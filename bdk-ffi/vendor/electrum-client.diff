@@ -1,0 +1,181 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -48,13 +48,17 @@
+     "dep:rustls",
+     "rustls/default",
+ ]
++# TALIA FORK: `rustls?/...` instead of `rustls/...`. In a feature list, `rustls/ring` also
++# switches on this crate's own feature named "rustls", which adds `rustls/default`, which is
++# aws-lc-rs: so "rustls-ring" built both crypto providers (C code included). With `?` it only
++# sets features on the rustls dependency that `dep:rustls` already enables.
+ rustls-ring = [
+     "webpki-roots",
+     "dep:rustls",
+-    "rustls/ring",
+-    "rustls/logging",
+-    "rustls/std",
+-    "rustls/tls12",
++    "rustls?/ring",
++    "rustls?/logging",
++    "rustls?/std",
++    "rustls?/tls12",
+ ]
+ use-openssl = ["openssl"]
+ use-rustls = ["rustls"]
+@@ -99,8 +103,9 @@
+ version = "0.10"
+ optional = true
+ 
++# TALIA FORK: at least 0.23.46 (RUSTSEC-2026-0346 to -0349 affect 0.23.45).
+ [dependencies.rustls]
+-version = "0.23.21"
++version = "0.23.46"
+ optional = true
+ default-features = false
+ 
+@@ -111,8 +116,10 @@
+ [dependencies.serde_json]
+ version = "^1.0"
+ 
++# TALIA FORK: the current Mozilla root list (webpki-roots 1.0), as in Talia's 0.28 line, which
++# leaves out the roots Mozilla has since removed or distrusted.
+ [dependencies.webpki-roots]
+-version = "0.25"
++version = "1.0.9"
+ optional = true
+ 
+ [dev-dependencies.bitreq]
+--- a/src/raw_client.rs
++++ b/src/raw_client.rs
+@@ -379,22 +379,37 @@
+             Ok(ServerCertVerified::assertion())
+         }
+ 
++        // TALIA FORK: validate_domain = false leaves the certificate itself (issuer, name,
++        // dates) unchecked, as it always has, but the server's TLS 1.2/1.3 handshake signature is
++        // still checked against the key in the certificate it sent, as rustls 0.20's defaults
++        // did and Talia's 0.28 line does. Upstream 0.25.0 accepted any signature here, so anyone
++        // on the path could stand in for the server without its key.
+         fn verify_tls12_signature(
+             &self,
+-            _message: &[u8],
+-            _cert: &CertificateDer<'_>,
+-            _dss: &DigitallySignedStruct,
++            message: &[u8],
++            cert: &CertificateDer<'_>,
++            dss: &DigitallySignedStruct,
+         ) -> Result<HandshakeSignatureValid, rustls::Error> {
+-            Ok(HandshakeSignatureValid::assertion())
++            rustls::crypto::verify_tls12_signature(
++                message,
++                cert,
++                dss,
++                &self.0.signature_verification_algorithms,
++            )
+         }
+ 
+         fn verify_tls13_signature(
+             &self,
+-            _message: &[u8],
+-            _cert: &CertificateDer<'_>,
+-            _dss: &DigitallySignedStruct,
++            message: &[u8],
++            cert: &CertificateDer<'_>,
++            dss: &DigitallySignedStruct,
+         ) -> Result<HandshakeSignatureValid, rustls::Error> {
+-            Ok(HandshakeSignatureValid::assertion())
++            rustls::crypto::verify_tls13_signature(
++                message,
++                cert,
++                dss,
++                &self.0.signature_verification_algorithms,
++            )
+         }
+ 
+         fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+@@ -403,6 +418,16 @@
+     }
+ }
+ 
++/// TALIA FORK: the roots a server's certificate must chain to when `validate_domain` is true:
++/// webpki-roots 1.0's bundled copy of Mozilla's list. Public so a test can check the list the
++/// client really uses (an empty or wrong list would refuse every public server).
++#[cfg(any(feature = "rustls", feature = "rustls-ring"))]
++pub fn default_root_store() -> RootCertStore {
++    RootCertStore {
++        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
++    }
++}
++
+ #[cfg(all(
+     any(feature = "rustls", feature = "rustls-ring"),
+     not(feature = "openssl")
+@@ -456,42 +481,24 @@
+     ) -> Result<Self, Error> {
+         use std::convert::TryFrom;
+ 
+-        if rustls::crypto::CryptoProvider::get_default().is_none() {
+-            // We install a crypto provider depending on the set feature.
+-            #[cfg(all(feature = "rustls", not(feature = "rustls-ring")))]
+-            rustls::crypto::CryptoProvider::install_default(
+-                rustls::crypto::aws_lc_rs::default_provider(),
+-            )
+-            .map_err(|_| {
+-                Error::CouldNotCreateConnection(rustls::Error::General(
+-                    "Failed to install CryptoProvider".to_string(),
+-                ))
+-            })?;
+-
+-            #[cfg(feature = "rustls-ring")]
+-            rustls::crypto::CryptoProvider::install_default(
+-                rustls::crypto::ring::default_provider(),
+-            )
+-            .map_err(|_| {
+-                Error::CouldNotCreateConnection(rustls::Error::General(
+-                    "Failed to install CryptoProvider".to_string(),
+-                ))
+-            })?;
+-        }
+-
+-        let builder = ClientConfig::builder();
++        // TALIA FORK: the crypto provider is named here, per connection, instead of installing
++        // one as the process-wide default and building from whatever default is installed, so
++        // nothing else linked into the app can change (or has to share) it. With it go rustls's
++        // safe default protocol versions (TLS 1.2 and 1.3), as upstream's builder() set.
++        #[cfg(feature = "rustls-ring")]
++        let provider = rustls::crypto::ring::default_provider();
++        #[cfg(all(feature = "rustls", not(feature = "rustls-ring")))]
++        let provider = rustls::crypto::aws_lc_rs::default_provider();
++        let provider = std::sync::Arc::new(provider);
++        let builder = ClientConfig::builder_with_provider(provider.clone())
++            .with_safe_default_protocol_versions()
++            .map_err(Error::CouldNotCreateConnection)?;
+ 
+         let config = if validate_domain {
+             socket_addr.domain().ok_or(Error::MissingDomain)?;
+ 
+-            let store = webpki_roots::TLS_SERVER_ROOTS
+-                .iter()
+-                .map(|t| TrustAnchor {
+-                    subject: Der::from_slice(t.subject),
+-                    subject_public_key_info: Der::from_slice(t.spki),
+-                    name_constraints: t.name_constraints.map(Der::from_slice),
+-                })
+-                .collect::<RootCertStore>();
++            // TALIA FORK: the bundled Mozilla root list, webpki-roots 1.0.
++            let store = default_root_store();
+ 
+             // TODO: cert pinning
+             builder.with_root_certificates(store).with_no_client_auth()
+@@ -499,10 +506,7 @@
+             builder
+                 .dangerous()
+                 .with_custom_certificate_verifier(std::sync::Arc::new(
+-                    #[cfg(all(feature = "rustls", not(feature = "rustls-ring")))]
+-                    danger::NoCertificateVerification::new(rustls::crypto::aws_lc_rs::default_provider()),
+-                    #[cfg(feature = "rustls-ring")]
+-                    danger::NoCertificateVerification::new(rustls::crypto::ring::default_provider()),
++                    danger::NoCertificateVerification::new(provider.as_ref().clone()),
+                 ))
+                 .with_no_client_auth()
+         };

@@ -1,0 +1,438 @@
+use crate::bitcoin::{ChildNumber, NetworkKind};
+use crate::error::{Bip32Error, Bip39Error, DescriptorKeyError};
+use crate::{impl_from_core_type, impl_into_core_type};
+
+use bdk_wallet::bitcoin::bip32::ChildNumber as BdkChildNumber;
+use bdk_wallet::bitcoin::bip32::DerivationPath as BdkDerivationPath;
+use bdk_wallet::bitcoin::key::Secp256k1;
+use bdk_wallet::bitcoin::secp256k1::rand;
+use bdk_wallet::bitcoin::secp256k1::rand::Rng;
+use bdk_wallet::keys::bip39::WordCount;
+use bdk_wallet::keys::bip39::{Language, Mnemonic as BdkMnemonic};
+use bdk_wallet::keys::{
+    DerivableKey, DescriptorPublicKey as BdkDescriptorPublicKey,
+    DescriptorSecretKey as BdkDescriptorSecretKey, ExtendedKey, GeneratableKey, GeneratedKey,
+};
+use bdk_wallet::miniscript::descriptor::{DescriptorXKey, Wildcard};
+use bdk_wallet::miniscript::BareCtx;
+
+use crate::types::WildcardType;
+use std::convert::TryFrom;
+use std::fmt::Display;
+use std::str::FromStr;
+use std::sync::Arc;
+
+/// A mnemonic seed phrase to recover a BIP-32 wallet.
+#[derive(uniffi::Object)]
+#[uniffi::export(Display)]
+pub struct Mnemonic(BdkMnemonic);
+
+#[uniffi::export]
+impl Mnemonic {
+    /// Generate a mnemonic given a word count.
+    #[uniffi::constructor]
+    pub fn new(word_count: WordCount) -> Self {
+        let mut rng = rand::thread_rng();
+        let mut entropy = [0u8; 32];
+        rng.fill(&mut entropy);
+
+        let generated_key: GeneratedKey<_, BareCtx> =
+            BdkMnemonic::generate_with_entropy((word_count, Language::English), entropy).unwrap();
+        let mnemonic = BdkMnemonic::parse_in(Language::English, generated_key.to_string()).unwrap();
+        Mnemonic(mnemonic)
+    }
+
+    /// Parse a string as a mnemonic seed phrase.
+    #[uniffi::constructor]
+    pub fn from_string(mnemonic: String) -> Result<Self, Bip39Error> {
+        BdkMnemonic::from_str(&mnemonic)
+            .map(Mnemonic)
+            .map_err(Bip39Error::from)
+    }
+
+    /// Construct a mnemonic from caller-provided entropy.
+    ///
+    /// This function does not generate entropy. Callers must provide cryptographically secure
+    /// entropy; weak entropy can result in loss of funds.
+    #[uniffi::constructor]
+    pub fn from_entropy(entropy: Vec<u8>) -> Result<Self, Bip39Error> {
+        BdkMnemonic::from_entropy(entropy.as_slice())
+            .map(Mnemonic)
+            .map_err(Bip39Error::from)
+    }
+}
+
+impl Display for Mnemonic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A BIP-32 derivation path.
+#[derive(Clone, Debug, uniffi::Object)]
+#[uniffi::export(Display)]
+pub struct DerivationPath(pub(crate) BdkDerivationPath);
+
+#[uniffi::export]
+impl DerivationPath {
+    /// Parse a string as a BIP-32 derivation path.
+    #[uniffi::constructor]
+    pub fn new(path: String) -> Result<Self, Bip32Error> {
+        BdkDerivationPath::from_str(&path)
+            .map(DerivationPath)
+            .map_err(Bip32Error::from)
+    }
+
+    /// Returns derivation path for a master key (i.e. empty derivation path)
+    #[uniffi::constructor]
+    pub fn master() -> Arc<Self> {
+        Arc::new(BdkDerivationPath::master().into())
+    }
+
+    /// Returns whether derivation path represents master key (i.e. it's length
+    /// is empty). True for `m` path.
+    pub fn is_master(&self) -> bool {
+        self.0.is_master()
+    }
+
+    /// Returns length of the derivation path
+    pub fn len(&self) -> u64 {
+        self.0.len() as u64
+    }
+
+    /// Returns `true` if the derivation path is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Create a new DerivationPath that is a child of this one.
+    pub fn child(&self, child_number: ChildNumber) -> Result<Arc<Self>, Bip32Error> {
+        let validated_child_number = BdkChildNumber::try_from(child_number)?;
+        Ok(Arc::new(self.0.child(validated_child_number).into()))
+    }
+
+    /// Concatenate `self` with `path` and return the resulting new path.
+    pub fn extend(&self, other: &DerivationPath) -> Arc<Self> {
+        let extended_path = self.0.extend(&other.0);
+        Arc::new(DerivationPath(extended_path))
+    }
+
+    /// Returns the derivation path as a vector of u32 integers.
+    /// Unhardened elements are copied as is.
+    /// 0x80000000 is added to the hardened elements.
+    pub fn to_u32_vec(&self) -> Vec<u32> {
+        self.0.to_u32_vec()
+    }
+}
+
+impl Display for DerivationPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl_from_core_type!(BdkDerivationPath, DerivationPath);
+impl_into_core_type!(DerivationPath, BdkDerivationPath);
+
+/// The descriptor secret key, either a single private key or an xprv.
+#[derive(Debug, uniffi::Object)]
+#[uniffi::export(Debug, Display)]
+pub struct DescriptorSecretKey(pub(crate) BdkDescriptorSecretKey);
+
+#[uniffi::export]
+impl DescriptorSecretKey {
+    /// Construct a secret descriptor key using a mnemonic.
+    #[uniffi::constructor]
+    pub fn new(network_kind: NetworkKind, mnemonic: &Mnemonic, password: Option<String>) -> Self {
+        let mnemonic = mnemonic.0.clone();
+        let xkey: ExtendedKey = (mnemonic, password).into_extended_key().unwrap();
+        let descriptor_secret_key = BdkDescriptorSecretKey::XPrv(DescriptorXKey {
+            origin: None,
+            xkey: xkey.into_xprv(network_kind).unwrap(),
+            derivation_path: BdkDerivationPath::master(),
+            wildcard: Wildcard::None,
+        });
+        Self(descriptor_secret_key)
+    }
+
+    /// Attempt to parse a string as a descriptor secret key.
+    #[uniffi::constructor]
+    pub fn from_string(private_key: String) -> Result<Self, DescriptorKeyError> {
+        let descriptor_secret_key = BdkDescriptorSecretKey::from_str(private_key.as_str())
+            .map_err(DescriptorKeyError::from)?;
+        Ok(Self(descriptor_secret_key))
+    }
+
+    /// Derive a descriptor secret key at a given derivation path.
+    ///
+    /// Any derivation path already recorded on this key (for example from `extend()` or from
+    /// parsing a key such as `xprv.../84h/1h/0h`) is applied first, so the result is the key at
+    /// `<existing path>/<path>`.
+    pub fn derive(&self, path: &DerivationPath) -> Result<Arc<Self>, DescriptorKeyError> {
+        let secp = Secp256k1::new();
+        let descriptor_secret_key = &self.0;
+        match descriptor_secret_key {
+            BdkDescriptorSecretKey::Single(_) => Err(DescriptorKeyError::InvalidKeyType),
+            BdkDescriptorSecretKey::XPrv(descriptor_x_key) => {
+                // Apply any derivation path already recorded on the key (from `extend()` or
+                // `from_string()`) before the requested path, so it is not silently discarded.
+                let full_path = descriptor_x_key.derivation_path.extend(&path.0);
+                let derived_xprv = descriptor_x_key
+                    .xkey
+                    .derive_priv(&secp, &full_path)
+                    .map_err(DescriptorKeyError::from)?;
+                let key_source = match descriptor_x_key.origin.clone() {
+                    Some((fingerprint, origin_path)) => {
+                        (fingerprint, origin_path.extend(&full_path))
+                    }
+                    None => (descriptor_x_key.xkey.fingerprint(&secp), full_path),
+                };
+                let derived_descriptor_secret_key = BdkDescriptorSecretKey::XPrv(DescriptorXKey {
+                    origin: Some(key_source),
+                    xkey: derived_xprv,
+                    derivation_path: BdkDerivationPath::default(),
+                    wildcard: descriptor_x_key.wildcard,
+                });
+                Ok(Arc::new(Self(derived_descriptor_secret_key)))
+            }
+            BdkDescriptorSecretKey::MultiXPrv(_) => Err(DescriptorKeyError::InvalidKeyType),
+        }
+    }
+
+    /// Extend the descriptor secret key by the derivation path.
+    pub fn extend(&self, path: &DerivationPath) -> Result<Arc<Self>, DescriptorKeyError> {
+        let descriptor_secret_key = &self.0;
+        match descriptor_secret_key {
+            BdkDescriptorSecretKey::Single(_) => Err(DescriptorKeyError::InvalidKeyType),
+            BdkDescriptorSecretKey::XPrv(descriptor_x_key) => {
+                let extended_path = descriptor_x_key.derivation_path.extend(&path.0);
+                let extended_descriptor_secret_key = BdkDescriptorSecretKey::XPrv(DescriptorXKey {
+                    origin: descriptor_x_key.origin.clone(),
+                    xkey: descriptor_x_key.xkey,
+                    derivation_path: extended_path,
+                    wildcard: descriptor_x_key.wildcard,
+                });
+                Ok(Arc::new(Self(extended_descriptor_secret_key)))
+            }
+            BdkDescriptorSecretKey::MultiXPrv(_) => Err(DescriptorKeyError::InvalidKeyType),
+        }
+    }
+
+    /// Add a wildcard derivation step (unhardened `*` or hardened `*h`) to this extended private key.
+    ///
+    /// If the key already has the same wildcard type, it is returned unchanged. Returns an error
+    /// if the key is not a single xprv, or if the key already has a wildcard of a different type.
+    pub fn add_wildcard(
+        &self,
+        wildcard_type: WildcardType,
+    ) -> Result<Arc<Self>, DescriptorKeyError> {
+        let descriptor_secret_key = &self.0;
+        match descriptor_secret_key {
+            BdkDescriptorSecretKey::Single(_) => Err(DescriptorKeyError::InvalidKeyType),
+            BdkDescriptorSecretKey::XPrv(descriptor_x_key) => {
+                let same_wildcard = (descriptor_x_key.wildcard == Wildcard::Unhardened
+                    && wildcard_type == WildcardType::Unhardened)
+                    || (descriptor_x_key.wildcard == Wildcard::Hardened
+                        && wildcard_type == WildcardType::Hardened);
+
+                // If there is a wildcard already present and it's of the same type as the one requested,
+                // return the same DescriptorSecretKey
+                if same_wildcard {
+                    let descriptor_secret_key_with_wildcard =
+                        BdkDescriptorSecretKey::XPrv(DescriptorXKey {
+                            origin: descriptor_x_key.origin.clone(),
+                            xkey: descriptor_x_key.xkey,
+                            derivation_path: descriptor_x_key.derivation_path.clone(),
+                            wildcard: descriptor_x_key.wildcard,
+                        });
+                    Ok(Arc::new(Self(descriptor_secret_key_with_wildcard)))
+                } else if descriptor_x_key.wildcard == Wildcard::None {
+                    // If the descriptor doesn't have a wildcard, add the requested wildcard
+                    let descriptor_secret_key_with_wildcard =
+                        BdkDescriptorSecretKey::XPrv(DescriptorXKey {
+                            origin: descriptor_x_key.origin.clone(),
+                            xkey: descriptor_x_key.xkey,
+                            derivation_path: descriptor_x_key.derivation_path.clone(),
+                            wildcard: wildcard_type.into(),
+                        });
+                    Ok(Arc::new(Self(descriptor_secret_key_with_wildcard)))
+                } else {
+                    // If the descriptor already has a wildcard of a different type, return an error
+                    Err(DescriptorKeyError::CannotChangeWildcardType)
+                }
+            }
+            BdkDescriptorSecretKey::MultiXPrv(_) => Err(DescriptorKeyError::InvalidKeyType),
+        }
+    }
+
+    /// Return the descriptor public key corresponding to this secret.
+    pub fn as_public(&self) -> Arc<DescriptorPublicKey> {
+        let secp = Secp256k1::new();
+        let descriptor_public_key = self.0.to_public(&secp).unwrap();
+        Arc::new(DescriptorPublicKey(descriptor_public_key))
+    }
+
+    /// Return the bytes of this descriptor secret key.
+    ///
+    /// For an extended private key, the key is derived along the derivation path it carries
+    /// before its bytes are returned.
+    ///
+    /// A key carrying a wildcard (`*` or `*h`) or a multipath key (one with a step such as
+    /// `<0;1>`) names a family of keys rather than a single key, so an empty vector is returned
+    /// for it. An empty vector is also returned if the derivation would exceed the maximum BIP-32
+    /// depth.
+    pub fn secret_bytes(&self) -> Vec<u8> {
+        let secp = Secp256k1::new();
+        let inner = &self.0;
+        let secret_bytes: Vec<u8> = match inner {
+            BdkDescriptorSecretKey::Single(single_key) => {
+                single_key.key.inner.secret_bytes().to_vec()
+            }
+            BdkDescriptorSecretKey::XPrv(descriptor_x_key)
+                if descriptor_x_key.wildcard == Wildcard::None =>
+            {
+                descriptor_x_key
+                    .xkey
+                    .derive_priv(&secp, &descriptor_x_key.derivation_path)
+                    .map(|derived| derived.private_key.secret_bytes().to_vec())
+                    .unwrap_or_default()
+            }
+            BdkDescriptorSecretKey::XPrv(_) | BdkDescriptorSecretKey::MultiXPrv(_) => Vec::new(),
+        };
+
+        secret_bytes
+    }
+}
+
+impl Display for DescriptorSecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A descriptor public key.
+#[derive(Debug, uniffi::Object)]
+#[uniffi::export(Debug, Display)]
+pub struct DescriptorPublicKey(pub(crate) BdkDescriptorPublicKey);
+
+#[uniffi::export]
+impl DescriptorPublicKey {
+    /// Attempt to parse a string as a descriptor public key.
+    #[uniffi::constructor]
+    pub fn from_string(public_key: String) -> Result<Self, DescriptorKeyError> {
+        let descriptor_public_key = BdkDescriptorPublicKey::from_str(public_key.as_str())
+            .map_err(DescriptorKeyError::from)?;
+        Ok(Self(descriptor_public_key))
+    }
+
+    /// Derive the descriptor public key at the given derivation path.
+    ///
+    /// Any derivation path already recorded on this key (for example from `extend()` or from
+    /// parsing a key such as `xpub.../0`) is applied first, so the result is the key at
+    /// `<existing path>/<path>`.
+    pub fn derive(&self, path: &DerivationPath) -> Result<Arc<Self>, DescriptorKeyError> {
+        let secp = Secp256k1::new();
+        let descriptor_public_key = &self.0;
+        match descriptor_public_key {
+            BdkDescriptorPublicKey::Single(_) => Err(DescriptorKeyError::InvalidKeyType),
+            BdkDescriptorPublicKey::XPub(descriptor_x_key) => {
+                // Apply any derivation path already recorded on the key (from `extend()` or
+                // `from_string()`) before the requested path, so it is not silently discarded.
+                let full_path = descriptor_x_key.derivation_path.extend(&path.0);
+                let derived_xpub = descriptor_x_key
+                    .xkey
+                    .derive_pub(&secp, &full_path)
+                    .map_err(DescriptorKeyError::from)?;
+                let key_source = match descriptor_x_key.origin.clone() {
+                    Some((fingerprint, origin_path)) => {
+                        (fingerprint, origin_path.extend(&full_path))
+                    }
+                    None => (descriptor_x_key.xkey.fingerprint(), full_path),
+                };
+                let derived_descriptor_public_key = BdkDescriptorPublicKey::XPub(DescriptorXKey {
+                    origin: Some(key_source),
+                    xkey: derived_xpub,
+                    derivation_path: BdkDerivationPath::default(),
+                    wildcard: descriptor_x_key.wildcard,
+                });
+                Ok(Arc::new(Self(derived_descriptor_public_key)))
+            }
+            BdkDescriptorPublicKey::MultiXPub(_) => Err(DescriptorKeyError::InvalidKeyType),
+        }
+    }
+
+    /// Extend the descriptor public key by the given derivation path.
+    pub fn extend(&self, path: &DerivationPath) -> Result<Arc<Self>, DescriptorKeyError> {
+        let descriptor_public_key = &self.0;
+        match descriptor_public_key {
+            BdkDescriptorPublicKey::Single(_) => Err(DescriptorKeyError::InvalidKeyType),
+            BdkDescriptorPublicKey::XPub(descriptor_x_key) => {
+                let extended_path = descriptor_x_key.derivation_path.extend(&path.0);
+                let extended_descriptor_public_key = BdkDescriptorPublicKey::XPub(DescriptorXKey {
+                    origin: descriptor_x_key.origin.clone(),
+                    xkey: descriptor_x_key.xkey,
+                    derivation_path: extended_path,
+                    wildcard: descriptor_x_key.wildcard,
+                });
+                Ok(Arc::new(Self(extended_descriptor_public_key)))
+            }
+            BdkDescriptorPublicKey::MultiXPub(_) => Err(DescriptorKeyError::InvalidKeyType),
+        }
+    }
+
+    /// Add an unhardened wildcard derivation step (`*`) to this extended public key.
+    ///
+    /// Public keys only support unhardened wildcards since xpubs cannot derive hardened children.
+    /// If the key already has an unhardened wildcard, it is returned unchanged. Returns an error
+    /// if the key is not a single xpub, or if the key already has a hardened wildcard.
+    pub fn add_wildcard(&self) -> Result<Arc<Self>, DescriptorKeyError> {
+        let descriptor_public_key = &self.0;
+        match descriptor_public_key {
+            BdkDescriptorPublicKey::Single(_) => Err(DescriptorKeyError::InvalidKeyType),
+            BdkDescriptorPublicKey::XPub(descriptor_x_key) => {
+                // If there is a wildcard already present and it's unhardened,
+                // return the same DescriptorPublicKey
+                if descriptor_x_key.wildcard == Wildcard::Unhardened {
+                    let descriptor_public_key_with_wildcard =
+                        BdkDescriptorPublicKey::XPub(DescriptorXKey {
+                            origin: descriptor_x_key.origin.clone(),
+                            xkey: descriptor_x_key.xkey,
+                            derivation_path: descriptor_x_key.derivation_path.clone(),
+                            wildcard: Wildcard::Unhardened,
+                        });
+                    Ok(Arc::new(Self(descriptor_public_key_with_wildcard)))
+                } else if descriptor_x_key.wildcard == Wildcard::None {
+                    // If the descriptor doesn't have a wildcard, add an Unhardened wildcard
+                    let descriptor_public_key_with_wildcard =
+                        BdkDescriptorPublicKey::XPub(DescriptorXKey {
+                            origin: descriptor_x_key.origin.clone(),
+                            xkey: descriptor_x_key.xkey,
+                            derivation_path: descriptor_x_key.derivation_path.clone(),
+                            wildcard: Wildcard::Unhardened,
+                        });
+                    Ok(Arc::new(Self(descriptor_public_key_with_wildcard)))
+                } else {
+                    // If the descriptor already has a wildcard and it's hardened, return an error, because (1) we don't want to allow changing the wildcard, and (2) extended public keys cannot derived hardened children
+                    Err(DescriptorKeyError::CannotChangeWildcardType)
+                }
+            }
+            BdkDescriptorPublicKey::MultiXPub(_) => Err(DescriptorKeyError::InvalidKeyType),
+        }
+    }
+
+    /// Whether or not this key has multiple derivation paths.
+    pub fn is_multipath(&self) -> bool {
+        self.0.is_multipath()
+    }
+
+    /// The fingerprint of the master key associated with this key, `0x00000000` if none.
+    pub fn master_fingerprint(&self) -> String {
+        self.0.master_fingerprint().to_string()
+    }
+}
+
+impl Display for DescriptorPublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}

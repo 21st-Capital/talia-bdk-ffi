@@ -1,0 +1,15 @@
+/target
+Cargo.lock
+/.vscode
+
+*.swp
+.idea
+justfile.local
+
+# Example persisted files.
+*.db
+*.sqlite*
+examples/test_data
+
+# Coverage reports
+lcov.info

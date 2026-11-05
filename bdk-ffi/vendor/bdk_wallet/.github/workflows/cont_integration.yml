@@ -1,0 +1,163 @@
+on: [push, pull_request]
+
+# Main continuous integration workflow that runs build, test, and code quality checks.
+# Runs on every push and pull request, testing against both MSRV (1.85) and stable Rust.
+# Includes no_std and WASM compatibility checks, formatting validation, and clippy linting.
+
+name: CI
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test-msrv:
+    name: Build & Test MSRV
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+        features:
+          - --no-default-features --features miniscript/no-std,bdk_chain/hashbrown
+          - --all-features
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # The 'toolchain' argument on this action overrides the Rust compiler version set in rust-toolchain.toml
+      # in order to test our MSRV.
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85 # MSRV
+          cache: true
+      - name: Pin dependencies for MSRV
+        run: ./ci/pin-msrv.sh
+      - name: Build + Test
+        run: |
+          cargo build --workspace --all-targets ${{ matrix.features }}
+          cargo test --workspace ${{ matrix.features }}
+
+  build-test-stable:
+    name: Build & Test Rust Stable
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+        features:
+          - --no-default-features --features miniscript/no-std,bdk_chain/hashbrown
+          - --all-features
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # This action will honor the Rust compiler version set in rust-toolchain.toml. We aim to keep it in sync with
+      # Rust stable.
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+      - name: Build + Test
+        run: |
+          cargo build --workspace --all-targets ${{ matrix.features }}
+          cargo test --workspace ${{ matrix.features }}
+
+  check-no-std:
+    name: Check no_std
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # This action automatically reads and applies rust-toolchain.toml
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+      - name: Check no-std
+        # TODO "--target thumbv6m-none-eabi" should work but currently does not
+        run: cargo check --no-default-features --features miniscript/no-std,bdk_chain/hashbrown
+
+  check-wasm:
+    name: Check WASM
+    runs-on: ubuntu-latest
+    env:
+      CC: clang-14
+      CFLAGS: -I/usr/include
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+        # Install a recent version of clang that supports wasm32
+      - run: wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add - || exit 1
+      - run: sudo apt-get update || exit 1
+      - run: sudo apt-get install -y libclang-common-14-dev clang-14 libc6-dev-i386 || exit 1
+      # This action automatically reads and applies rust-toolchain.toml
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          target: wasm32-unknown-unknown
+      - name: Check WASM
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check --target wasm32-unknown-unknown --no-default-features --features miniscript/no-std,bdk_chain/hashbrown
+
+  fmt:
+    name: Rust fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # This action automatically reads and applies rust-toolchain.toml
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+      - name: Check fmt
+        run: cargo fmt --all --check
+
+  clippy_check:
+    name: Rust clippy
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # This action automatically reads and applies rust-toolchain.toml
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+      - name: Clippy
+        run: cargo clippy --all-features --all-targets -- -D warnings
+
+  docs_check:
+    name: Check cargo doc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # This action automatically reads and applies rust-toolchain.toml
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+      - name: Check docs
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps

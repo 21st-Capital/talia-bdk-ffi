@@ -1,0 +1,234 @@
+--- a/src/bdk_electrum_client.rs
++++ b/src/bdk_electrum_client.rs
+@@ -1,6 +1,8 @@
+ use bdk_core::{
+     bitcoin::{
+         block::Header,
++        consensus::deserialize,
++        hex::FromHex,
+         opcodes::{all::OP_RETURN, OP_FALSE},
+         BlockHash, OutPoint, Transaction, Txid,
+     },
+@@ -10,13 +12,20 @@
+     },
+     BlockId, CheckPoint, ConfirmationBlockTime, TxUpdate,
+ };
+-use electrum_client::{ElectrumApi, Error, HeaderNotification};
++use electrum_client::{Batch, ElectrumApi, Error, HeaderNotification};
+ use std::convert::TryInto;
+ use std::sync::{Arc, Mutex};
+ 
+ /// We include a chain suffix of a certain length for the purpose of robustness.
+ const CHAIN_SUFFIX_LENGTH: u32 = 8;
+ 
++/// TALIA FORK (decided 2026-10-25): the most requests in one batched request when a sync asks
++/// for transactions it does not hold yet, or for headers again (`prefetch_txs`,
++/// `prefetch_headers`). Kept small for public servers: 100 transaction requests are one write of
++/// about 11 kB and one round trip. The batches upstream already makes (script histories at the
++/// caller's `batch_size`, the headers and proofs of `batch_fetch_anchors`) are unchanged.
++const MAX_FETCH_BATCH: usize = 100;
++
+ /// Wrapper around an [`electrum_client::ElectrumApi`] which includes an internal in-memory
+ /// transaction cache to avoid re-fetching already downloaded transactions.
+ #[derive(Debug)]
+@@ -94,6 +103,103 @@
+         Ok(tx)
+     }
+ 
++    /// TALIA FORK (decided 2026-10-25): put the transactions `txids` names that the cache does
++    /// not hold into it, asked for in batched requests of at most [`MAX_FETCH_BATCH`] instead of
++    /// one round trip each (upstream fetched every one on its own, so a first sync of a wallet
++    /// with a history took one round trip per transaction and per previous transaction).
++    ///
++    /// This only warms the cache. Every caller still goes through [`Self::fetch_tx`] for every
++    /// transaction, in upstream's order, and finds it there. A transaction is cached only when it
++    /// passes the check `fetch_tx` makes (its txid is the one asked for). Anything else is left
++    /// out: an answer that is not a transaction (a refusal, an error), a transaction with another
++    /// txid, a batch that fails as a whole (a refused request, a lost connection, a timeout).
++    /// A batch refused in its turn (`Error::Protocol`: electrum-client gives up on that batch
++    /// and keeps the connection, and its `Client` does not retry it) ends only that batch, so
++    /// the next one still goes; any other failure (a lost connection, a timeout, retries used
++    /// up) ends the warm-up. `fetch_tx` then asks for each transaction still missing on its own,
++    /// exactly as upstream, so the caller succeeds or fails as before (a missing transaction is
++    /// still an error, in the server's own words). The one exception: a server that refuses a
++    /// request once and answers it when asked again is asked twice here (in the batch, then by
++    /// `fetch_tx`), so the sync finishes where upstream's single ask fails with the refusal. A
++    /// lone missing transaction is left to `fetch_tx` as well: a batch of one is the same request.
++    ///
++    /// The batch goes through [`ElectrumApi::batch_call`] and each answer is read here, not
++    /// through `batch_transaction_get`. electrum-client 0.25 hands back an error answer that
++    /// arrived before its turn (a server answering out of order) as a null result;
++    /// `batch_transaction_get` would fail to parse it, and its `Client` takes a parse failure for
++    /// a failed connection: it reconnects, pauses and sends the whole batch again, as many times
++    /// as its retry count allows.
++    fn prefetch_txs(&self, txids: impl IntoIterator<Item = Txid>) {
++        let missing: Vec<Txid> = {
++            let tx_cache = self.tx_cache.lock().unwrap();
++            let mut seen = HashSet::<Txid>::new();
++            txids
++                .into_iter()
++                .filter(|txid| !tx_cache.contains_key(txid) && seen.insert(*txid))
++                .collect()
++        };
++        for chunk in missing.chunks(MAX_FETCH_BATCH) {
++            if chunk.len() < 2 {
++                continue;
++            }
++            let mut batch = Batch::default();
++            for txid in chunk {
++                batch.transaction_get(txid);
++            }
++            let answers = match self.inner.batch_call(&batch) {
++                Ok(answers) if answers.len() == chunk.len() => answers,
++                Err(Error::Protocol(_)) => continue,
++                _ => return,
++            };
++            let mut tx_cache = self.tx_cache.lock().unwrap();
++            for (txid, answer) in chunk.iter().zip(answers) {
++                let tx = answer
++                    .as_str()
++                    .and_then(|hex| Vec::<u8>::from_hex(hex).ok())
++                    .and_then(|bytes| deserialize::<Transaction>(&bytes).ok());
++                if let Some(tx) = tx {
++                    if tx.compute_txid() == *txid {
++                        tx_cache.entry(*txid).or_insert_with(|| Arc::new(tx));
++                    }
++                }
++            }
++        }
++    }
++
++    /// TALIA FORK (decided 2026-10-25): the block headers at `heights`, asked for in batched
++    /// requests of at most [`MAX_FETCH_BATCH`], for `batch_fetch_anchors` to use where it fetched
++    /// a header again on its own. Only what the server answered with a header; a batch refused
++    /// in its turn ends only that batch, any other failure ends it all (as in `prefetch_txs`),
++    /// and a height left out is fetched on its own, as upstream. Fewer than two heights: nothing
++    /// (the same request either way).
++    fn prefetch_headers(&self, heights: &[u32]) -> HashMap<u32, Header> {
++        let mut fresh = HashMap::<u32, Header>::new();
++        for chunk in heights.chunks(MAX_FETCH_BATCH) {
++            if chunk.len() < 2 {
++                continue;
++            }
++            let mut batch = Batch::default();
++            for &height in chunk {
++                batch.block_header(height);
++            }
++            let answers = match self.inner.batch_call(&batch) {
++                Ok(answers) if answers.len() == chunk.len() => answers,
++                Err(Error::Protocol(_)) => continue,
++                _ => break,
++            };
++            for (&height, answer) in chunk.iter().zip(answers) {
++                let header = answer
++                    .as_str()
++                    .and_then(|hex| Vec::<u8>::from_hex(hex).ok())
++                    .and_then(|bytes| deserialize::<Header>(&bytes).ok());
++                if let Some(header) = header {
++                    fresh.insert(height, header);
++                }
++            }
++        }
++        fresh
++    }
++
+     /// Broadcasts a transaction to the network.
+     ///
+     /// This is a re-export of [`ElectrumApi::transaction_broadcast`].
+@@ -313,6 +419,28 @@
+             let spk_histories = self
+                 .inner
+                 .batch_script_get_history(spks.iter().map(|(_, s)| s.spk.as_script()))?;
++
++            // TALIA FORK (decided 2026-10-25): the transactions of this batch's histories in
++            // batched requests (see `prefetch_txs`), but only those of the scripts the loop below
++            // gets to: it returns at the stop gap and never fetches the histories after that
++            // point. The same counting as the loop's, on copies of its counters.
++            {
++                let mut unused_spk_count = unused_spk_count;
++                let mut txids = Vec::<Txid>::new();
++                for ((spk_index, _), spk_history) in spks.iter().zip(spk_histories.iter()) {
++                    let beyond_revealed = last_revealed.map_or(true, |lr| *spk_index > lr);
++                    if !spk_history.is_empty() {
++                        unused_spk_count = 0;
++                    } else if beyond_revealed {
++                        unused_spk_count = unused_spk_count.saturating_add(1);
++                        if unused_spk_count >= stop_gap {
++                            break;
++                        }
++                    }
++                    txids.extend(spk_history.iter().map(|res| res.tx_hash));
++                }
++                self.prefetch_txs(txids);
++            }
+ 
+             for ((spk_index, spk), spk_history) in spks.into_iter().zip(spk_histories) {
+                 let beyond_revealed = last_revealed.map_or(true, |lr| spk_index > lr);
+@@ -577,6 +705,35 @@
+ 
+         // Fetch merkle proofs.
+         let proofs = self.inner.batch_transaction_get_merkle(to_fetch.iter())?;
++
++        // TALIA FORK (decided 2026-10-25): the headers the loop below fetches again, in batched
++        // requests (`prefetch_headers`). They are exactly the heights where a proof does not
++        // match the header cached now: the loop fetches a height again at its first such proof
++        // (the proofs before it at that height matched the cached header), and at no other
++        // height. The loop takes a header from `fresh` where upstream asked for it on its own
++        // (each later stale proof at the same height asked again for the same header); a
++        // height the batch did not bring is still fetched on its own.
++        let fresh = {
++            let mut stale = Vec::<u32>::new();
++            let mut seen = HashSet::<u32>::new();
++            {
++                let cache = self.block_header_cache.lock().unwrap();
++                for ((txid, height), proof) in to_fetch.iter().zip(proofs.iter()) {
++                    let h = *height as u32;
++                    if let Some(header) = cache.get(&h) {
++                        if !electrum_client::utils::validate_merkle_proof(
++                            txid,
++                            &header.merkle_root,
++                            proof,
++                        ) && seen.insert(h)
++                        {
++                            stale.push(h);
++                        }
++                    }
++                }
++            }
++            self.prefetch_headers(&stale)
++        };
+ 
+         // Validate each proof, retrying once for each stale header.
+         for ((txid, height), proof) in to_fetch.into_iter().zip(proofs.into_iter()) {
+@@ -590,7 +747,11 @@
+             let mut valid =
+                 electrum_client::utils::validate_merkle_proof(&txid, &header.merkle_root, &proof);
+             if !valid {
+-                header = self.inner.block_header(height)?;
++                // TALIA FORK: the batched header when there is one (see `fresh` above).
++                header = match fresh.get(&(height as u32)) {
++                    Some(fresh_header) => *fresh_header,
++                    None => self.inner.block_header(height)?,
++                };
+                 self.block_header_cache
+                     .lock()
+                     .unwrap()
+@@ -630,6 +791,18 @@
+         &self,
+         tx_update: &mut TxUpdate<ConfirmationBlockTime>,
+     ) -> Result<(), Error> {
++        // TALIA FORK (decided 2026-10-25): the previous transactions the loop below fetches, in
++        // batched requests first (see `prefetch_txs`): the same transactions, the same skips.
++        {
++            let mut no_dup = HashSet::<Txid>::new();
++            let prev_txids = tx_update
++                .txs
++                .iter()
++                .filter(|tx| !tx.is_coinbase() && no_dup.insert(tx.compute_txid()))
++                .flat_map(|tx| tx.input.iter().map(|vin| vin.previous_output.txid))
++                .collect::<Vec<_>>();
++            self.prefetch_txs(prev_txids);
++        }
+         let mut no_dup = HashSet::<Txid>::new();
+         for tx in &tx_update.txs {
+             if !tx.is_coinbase() && no_dup.insert(tx.compute_txid()) {

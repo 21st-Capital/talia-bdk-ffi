@@ -1,0 +1,67 @@
+name: Rust Dependency Audit
+
+# RustSec advisories against bdk-ffi/Cargo.lock.
+#
+# Talia (21st Capital): cargo-audit runs in CI only, never on a developer
+# machine. Every action is pinned by commit, and the job runs on ubuntu-24.04.
+#
+# cargo-audit itself is pinned too. rustsec/audit-check installs whatever
+# cargo-audit is newest, without --locked, inside the step that holds the
+# token, so every run would compile freshly resolved crates (and run their
+# build scripts) next to INPUT_TOKEN, and the verdict would depend on what
+# crates.io served that day. Instead the step before it, which has no token,
+# installs one exact version from that version's own Cargo.lock; the action
+# then finds it on PATH and installs nothing. Moving the version is a
+# deliberate, reviewed change to this file.
+#
+# No `schedule` here: the audit runs when a manifest or Cargo.lock changes, or
+# by hand. Without a schedule the action never opens issues, so the job needs
+# no `issues: write`.
+
+on:
+  push:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/audit.yaml'
+  pull_request:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/audit.yaml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  security-audit:
+    name: "Security audit"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: "Check out"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Install the toolchain rust-toolchain.toml names"
+        run: |
+          rustup toolchain install
+          rustc --version --verbose
+
+      - name: "Install cargo-audit 0.22.2 with its own Cargo.lock (no token in this step)"
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install --list
+          cargo install --list | grep -qx 'cargo-audit v0.22.2:'
+          command -v cargo-audit
+
+      - name: "Run cargo audit on bdk-ffi/Cargo.lock"
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: bdk-ffi/

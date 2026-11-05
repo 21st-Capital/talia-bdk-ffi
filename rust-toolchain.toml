@@ -1,0 +1,18 @@
+# TALIA FORK: the exact compiler every Talia build of this fork uses
+# (decided 2026-10-07). Upstream pins 1.90.0 with clippy and rustfmt; this
+# names 1.97.1 (8bab26f4f 2026-07-14), the rustc that built the libraries
+# Talia pins today, in the same form as 21st Capital's bitbox-ffi: the three iOS
+# targets Talia's build script makes and no components, so nothing is
+# downloaded inside the `env -i` build. bdk_wallet 3.1.0 needs >= 1.85.
+# Moving it is a deliberate change: rebuild, retest on the device, re-pin.
+#
+# At the repository root, not in bdk-ffi/: rustup looks for this file in the
+# directory cargo is started from and in every parent, so the pin holds
+# whether the build runs inside bdk-ffi/ or from the root with
+# `--manifest-path bdk-ffi/Cargo.toml` (as Talia's earlier library and the
+# app's build script do). Inside bdk-ffi/ alone it silently gave way to the
+# default toolchain from the root. Only vendor/bdk_wallet/ has a file of its
+# own (1.95.0), which applies only when cargo is started inside that folder.
+[toolchain]
+channel = "1.97.1"
+targets = ["aarch64-apple-ios", "aarch64-apple-ios-sim", "x86_64-apple-ios"]

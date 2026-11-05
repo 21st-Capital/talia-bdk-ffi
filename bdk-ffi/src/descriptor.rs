@@ -1,0 +1,794 @@
+use crate::bitcoin::DescriptorId;
+use crate::bitcoin::DescriptorType;
+use crate::bitcoin::{Address, NetworkKind};
+use crate::error::DescriptorError;
+use crate::error::MiniscriptError;
+use crate::error::WITHHELD;
+use crate::keys::DescriptorPublicKey;
+use crate::keys::DescriptorSecretKey;
+use crate::types::KeychainKind;
+
+use bdk_wallet::bitcoin::bip32::Fingerprint;
+use bdk_wallet::bitcoin::key::Secp256k1;
+use bdk_wallet::bitcoin::Network;
+use bdk_wallet::chain::DescriptorExt;
+use bdk_wallet::descriptor::{ExtendedDescriptor, IntoWalletDescriptor};
+use bdk_wallet::keys::DescriptorPublicKey as BdkDescriptorPublicKey;
+use bdk_wallet::keys::{DescriptorSecretKey as BdkDescriptorSecretKey, KeyMap};
+use bdk_wallet::miniscript::descriptor::{ConversionError, TapTree};
+use bdk_wallet::miniscript::Descriptor as BdkDescriptor;
+use bdk_wallet::miniscript::Miniscript as BdkMiniscript;
+use bdk_wallet::template::{
+    Bip44, Bip44Public, Bip49, Bip49Public, Bip84, Bip84Public, Bip86, Bip86Public,
+    DescriptorTemplate,
+};
+
+use std::fmt::Display;
+use std::str::FromStr;
+use std::sync::Arc;
+
+/// An expression of how to derive output scripts: https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md
+#[derive(Debug, uniffi::Object)]
+#[uniffi::export(Debug, Display)]
+pub struct Descriptor {
+    pub extended_descriptor: ExtendedDescriptor,
+    pub key_map: KeyMap,
+}
+
+#[uniffi::export]
+impl Descriptor {
+    /// Parse a string as a descriptor for the given network.
+    #[uniffi::constructor]
+    pub fn new(descriptor: String, network_kind: NetworkKind) -> Result<Self, DescriptorError> {
+        let secp = Secp256k1::new();
+        let (extended_descriptor, key_map) =
+            descriptor.into_wallet_descriptor(&secp, network_kind)?;
+        Ok(Self {
+            extended_descriptor,
+            key_map,
+        })
+    }
+
+    /// Multi-account hierarchy descriptor: https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki
+    #[uniffi::constructor]
+    pub fn new_bip44(
+        secret_key: &DescriptorSecretKey,
+        keychain_kind: KeychainKind,
+        network_kind: NetworkKind,
+    ) -> Self {
+        let derivable_key = &secret_key.0;
+
+        match derivable_key {
+            BdkDescriptorSecretKey::Single(_) => {
+                unreachable!()
+            }
+            BdkDescriptorSecretKey::XPrv(descriptor_x_key) => {
+                let derivable_key = descriptor_x_key.xkey;
+                let (extended_descriptor, key_map, _) = Bip44(derivable_key, keychain_kind)
+                    .build(network_kind)
+                    .unwrap();
+                Self {
+                    extended_descriptor,
+                    key_map,
+                }
+            }
+            BdkDescriptorSecretKey::MultiXPrv(_) => {
+                unreachable!()
+            }
+        }
+    }
+
+    /// Multi-account hierarchy descriptor: https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki
+    #[uniffi::constructor]
+    pub fn new_bip44_public(
+        public_key: &DescriptorPublicKey,
+        fingerprint: String,
+        keychain_kind: KeychainKind,
+        network_kind: NetworkKind,
+    ) -> Result<Self, DescriptorError> {
+        let fingerprint =
+            Fingerprint::from_str(fingerprint.as_str()).map_err(|_| DescriptorError::Bip32 {
+                error_message: WITHHELD.to_string(),
+            })?;
+        let derivable_key = &public_key.0;
+
+        match derivable_key {
+            BdkDescriptorPublicKey::Single(_) => {
+                unreachable!()
+            }
+            BdkDescriptorPublicKey::XPub(descriptor_x_key) => {
+                let derivable_key = descriptor_x_key.xkey;
+                let (extended_descriptor, key_map, _) =
+                    Bip44Public(derivable_key, fingerprint, keychain_kind)
+                        .build(network_kind)
+                        .map_err(DescriptorError::from)?;
+
+                Ok(Self {
+                    extended_descriptor,
+                    key_map,
+                })
+            }
+            BdkDescriptorPublicKey::MultiXPub(_) => {
+                unreachable!()
+            }
+        }
+    }
+
+    /// P2SH nested P2WSH descriptor: https://github.com/bitcoin/bips/blob/master/bip-0049.mediawiki
+    #[uniffi::constructor]
+    pub fn new_bip49(
+        secret_key: &DescriptorSecretKey,
+        keychain_kind: KeychainKind,
+        network_kind: NetworkKind,
+    ) -> Self {
+        let derivable_key = &secret_key.0;
+
+        match derivable_key {
+            BdkDescriptorSecretKey::Single(_) => {
+                unreachable!()
+            }
+            BdkDescriptorSecretKey::XPrv(descriptor_x_key) => {
+                let derivable_key = descriptor_x_key.xkey;
+                let (extended_descriptor, key_map, _) = Bip49(derivable_key, keychain_kind)
+                    .build(network_kind)
+                    .unwrap();
+                Self {
+                    extended_descriptor,
+                    key_map,
+                }
+            }
+            BdkDescriptorSecretKey::MultiXPrv(_) => {
+                unreachable!()
+            }
+        }
+    }
+
+    /// P2SH nested P2WSH descriptor: https://github.com/bitcoin/bips/blob/master/bip-0049.mediawiki
+    #[uniffi::constructor]
+    pub fn new_bip49_public(
+        public_key: &DescriptorPublicKey,
+        fingerprint: String,
+        keychain_kind: KeychainKind,
+        network_kind: NetworkKind,
+    ) -> Result<Self, DescriptorError> {
+        let fingerprint =
+            Fingerprint::from_str(fingerprint.as_str()).map_err(|_| DescriptorError::Bip32 {
+                error_message: WITHHELD.to_string(),
+            })?;
+        let derivable_key = &public_key.0;
+
+        match derivable_key {
+            BdkDescriptorPublicKey::Single(_) => {
+                unreachable!()
+            }
+            BdkDescriptorPublicKey::XPub(descriptor_x_key) => {
+                let derivable_key = descriptor_x_key.xkey;
+                let (extended_descriptor, key_map, _) =
+                    Bip49Public(derivable_key, fingerprint, keychain_kind)
+                        .build(network_kind)
+                        .map_err(DescriptorError::from)?;
+
+                Ok(Self {
+                    extended_descriptor,
+                    key_map,
+                })
+            }
+            BdkDescriptorPublicKey::MultiXPub(_) => {
+                unreachable!()
+            }
+        }
+    }
+
+    /// Pay to witness PKH descriptor: https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki
+    #[uniffi::constructor]
+    pub fn new_bip84(
+        secret_key: &DescriptorSecretKey,
+        keychain_kind: KeychainKind,
+        network_kind: NetworkKind,
+    ) -> Self {
+        let derivable_key = &secret_key.0;
+
+        match derivable_key {
+            BdkDescriptorSecretKey::Single(_) => {
+                unreachable!()
+            }
+            BdkDescriptorSecretKey::XPrv(descriptor_x_key) => {
+                let derivable_key = descriptor_x_key.xkey;
+                let (extended_descriptor, key_map, _) = Bip84(derivable_key, keychain_kind)
+                    .build(network_kind)
+                    .unwrap();
+                Self {
+                    extended_descriptor,
+                    key_map,
+                }
+            }
+            BdkDescriptorSecretKey::MultiXPrv(_) => {
+                unreachable!()
+            }
+        }
+    }
+
+    /// Pay to witness PKH descriptor: https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki
+    #[uniffi::constructor]
+    pub fn new_bip84_public(
+        public_key: &DescriptorPublicKey,
+        fingerprint: String,
+        keychain_kind: KeychainKind,
+        network_kind: NetworkKind,
+    ) -> Result<Self, DescriptorError> {
+        let fingerprint =
+            Fingerprint::from_str(fingerprint.as_str()).map_err(|_| DescriptorError::Bip32 {
+                error_message: WITHHELD.to_string(),
+            })?;
+        let derivable_key = &public_key.0;
+
+        match derivable_key {
+            BdkDescriptorPublicKey::Single(_) => {
+                unreachable!()
+            }
+            BdkDescriptorPublicKey::XPub(descriptor_x_key) => {
+                let derivable_key = descriptor_x_key.xkey;
+                let (extended_descriptor, key_map, _) =
+                    Bip84Public(derivable_key, fingerprint, keychain_kind)
+                        .build(network_kind)
+                        .map_err(DescriptorError::from)?;
+
+                Ok(Self {
+                    extended_descriptor,
+                    key_map,
+                })
+            }
+            BdkDescriptorPublicKey::MultiXPub(_) => {
+                unreachable!()
+            }
+        }
+    }
+
+    /// Single key P2TR descriptor: https://github.com/bitcoin/bips/blob/master/bip-0086.mediawiki
+    #[uniffi::constructor]
+    pub fn new_bip86(
+        secret_key: &DescriptorSecretKey,
+        keychain_kind: KeychainKind,
+        network_kind: NetworkKind,
+    ) -> Self {
+        let derivable_key = &secret_key.0;
+
+        match derivable_key {
+            BdkDescriptorSecretKey::Single(_) => {
+                unreachable!()
+            }
+            BdkDescriptorSecretKey::XPrv(descriptor_x_key) => {
+                let derivable_key = descriptor_x_key.xkey;
+                let (extended_descriptor, key_map, _) = Bip86(derivable_key, keychain_kind)
+                    .build(network_kind)
+                    .unwrap();
+                Self {
+                    extended_descriptor,
+                    key_map,
+                }
+            }
+            BdkDescriptorSecretKey::MultiXPrv(_) => {
+                unreachable!()
+            }
+        }
+    }
+
+    /// Single key P2TR descriptor: https://github.com/bitcoin/bips/blob/master/bip-0086.mediawiki
+    #[uniffi::constructor]
+    pub fn new_bip86_public(
+        public_key: &DescriptorPublicKey,
+        fingerprint: String,
+        keychain_kind: KeychainKind,
+        network_kind: NetworkKind,
+    ) -> Result<Self, DescriptorError> {
+        let fingerprint =
+            Fingerprint::from_str(fingerprint.as_str()).map_err(|_| DescriptorError::Bip32 {
+                error_message: WITHHELD.to_string(),
+            })?;
+        let derivable_key = &public_key.0;
+
+        match derivable_key {
+            BdkDescriptorPublicKey::Single(_) => {
+                unreachable!()
+            }
+            BdkDescriptorPublicKey::XPub(descriptor_x_key) => {
+                let derivable_key = descriptor_x_key.xkey;
+                let (extended_descriptor, key_map, _) =
+                    Bip86Public(derivable_key, fingerprint, keychain_kind)
+                        .build(network_kind)
+                        .map_err(DescriptorError::from)?;
+
+                Ok(Self {
+                    extended_descriptor,
+                    key_map,
+                })
+            }
+            BdkDescriptorPublicKey::MultiXPub(_) => {
+                unreachable!()
+            }
+        }
+    }
+
+    /// Create a new wsh sorted multi descriptor
+    /// Errors when miniscript exceeds resource limits under p2sh context
+    #[uniffi::constructor]
+    pub fn new_wsh_sortedmulti(k: u32, pks: Vec<String>) -> Result<Self, DescriptorError> {
+        let bdk_pks: Vec<BdkDescriptorPublicKey> = pks
+            .iter()
+            .map(|pk| {
+                BdkDescriptorPublicKey::from_str(pk).map_err(|_| DescriptorError::Key {
+                    error_message: WITHHELD.to_string(),
+                })
+            })
+            .collect::<Result<Vec<BdkDescriptorPublicKey>, DescriptorError>>()?;
+        let miniscript_descriptor =
+            match bdk_wallet::miniscript::Descriptor::new_wsh_sortedmulti(k as usize, bdk_pks) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    return Err(DescriptorError::Miniscript {
+                        error_message: WITHHELD.to_string(),
+                    })
+                }
+            };
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new sh sortedmulti descriptor with threshold k and Vec of pks.
+    /// Errors when miniscript exceeds resource limits under p2sh context
+    #[uniffi::constructor]
+    pub fn new_sh_sortedmulti(k: u32, pks: Vec<String>) -> Result<Self, DescriptorError> {
+        let bdk_pks: Vec<BdkDescriptorPublicKey> = pks
+            .iter()
+            .map(|pk| {
+                BdkDescriptorPublicKey::from_str(pk).map_err(|_| DescriptorError::Key {
+                    error_message: WITHHELD.to_string(),
+                })
+            })
+            .collect::<Result<Vec<BdkDescriptorPublicKey>, DescriptorError>>()?;
+        let miniscript_descriptor =
+            match bdk_wallet::miniscript::Descriptor::new_sh_sortedmulti(k as usize, bdk_pks) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    return Err(DescriptorError::Miniscript {
+                        error_message: WITHHELD.to_string(),
+                    })
+                }
+            };
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new sh wrapped wsh sortedmulti descriptor from threshold k and Vec of pks
+    /// Errors when miniscript exceeds resource limits under segwit context
+    #[uniffi::constructor]
+    pub fn new_sh_wsh_sortedmulti(k: u32, pks: Vec<String>) -> Result<Self, DescriptorError> {
+        let bdk_pks: Vec<BdkDescriptorPublicKey> = pks
+            .iter()
+            .map(|pk| {
+                BdkDescriptorPublicKey::from_str(pk).map_err(|_| DescriptorError::Key {
+                    error_message: WITHHELD.to_string(),
+                })
+            })
+            .collect::<Result<Vec<BdkDescriptorPublicKey>, DescriptorError>>()?;
+        let miniscript_descriptor =
+            match bdk_wallet::miniscript::Descriptor::new_sh_wsh_sortedmulti(k as usize, bdk_pks) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    return Err(DescriptorError::Miniscript {
+                        error_message: WITHHELD.to_string(),
+                    })
+                }
+            };
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new pay-to-pubkey descriptor from a public key string.
+    #[uniffi::constructor]
+    pub fn new_pk(pk: String) -> Result<Self, DescriptorError> {
+        let key = BdkDescriptorPublicKey::from_str(&pk).map_err(|_| DescriptorError::Key {
+            error_message: WITHHELD.to_string(),
+        })?;
+
+        let miniscript_descriptor = bdk_wallet::miniscript::Descriptor::new_pk(key);
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new PkH descriptor
+    #[uniffi::constructor]
+    pub fn new_pkh(pk: String) -> Result<Self, DescriptorError> {
+        let key = BdkDescriptorPublicKey::from_str(&pk).map_err(|_| DescriptorError::Key {
+            error_message: WITHHELD.to_string(),
+        })?;
+
+        let miniscript_descriptor = match bdk_wallet::miniscript::Descriptor::new_pkh(key) {
+            Ok(descriptor) => descriptor,
+            Err(_) => {
+                return Err(DescriptorError::Miniscript {
+                    error_message: WITHHELD.to_string(),
+                })
+            }
+        };
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new Wpkh descriptor Will return Err if uncompressed key is used
+    #[uniffi::constructor]
+    pub fn new_wpkh(pk: String) -> Result<Self, DescriptorError> {
+        let key = BdkDescriptorPublicKey::from_str(&pk).map_err(|_| DescriptorError::Key {
+            error_message: WITHHELD.to_string(),
+        })?;
+
+        let miniscript_descriptor = match bdk_wallet::miniscript::Descriptor::new_wpkh(key) {
+            Ok(descriptor) => descriptor,
+            Err(_) => {
+                return Err(DescriptorError::Miniscript {
+                    error_message: WITHHELD.to_string(),
+                })
+            }
+        };
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new sh wrapped wpkh from Pk. Errors when uncompressed keys are supplied
+    #[uniffi::constructor]
+    pub fn new_sh_wpkh(pk: String) -> Result<Self, DescriptorError> {
+        let key = BdkDescriptorPublicKey::from_str(&pk).map_err(|_| DescriptorError::Key {
+            error_message: WITHHELD.to_string(),
+        })?;
+
+        let miniscript_descriptor = match bdk_wallet::miniscript::Descriptor::new_sh_wpkh(key) {
+            Ok(descriptor) => descriptor,
+            Err(_) => {
+                return Err(DescriptorError::Miniscript {
+                    error_message: WITHHELD.to_string(),
+                })
+            }
+        };
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new wsh descriptor from witness script Errors when miniscript exceeds resource limits
+    /// under p2sh context or does not type check at the top level
+    #[uniffi::constructor]
+    pub fn new_wsh(mini_script: String) -> Result<Self, DescriptorError> {
+        let parsed_miniscript = match BdkMiniscript::from_str(&mini_script) {
+            Ok(miniscript) => miniscript,
+            Err(_) => {
+                return Err(DescriptorError::Miniscript {
+                    error_message: WITHHELD.to_string(),
+                });
+            }
+        };
+
+        let miniscript_descriptor =
+            match bdk_wallet::miniscript::Descriptor::new_wsh(parsed_miniscript) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    return Err(DescriptorError::Miniscript {
+                        error_message: WITHHELD.to_string(),
+                    })
+                }
+            };
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new sh wrapped wsh descriptor with witness script Errors when miniscript exceeds resource limits
+    /// under wsh context or does not type check at the top level
+    #[uniffi::constructor]
+    pub fn new_sh_wsh(mini_script: String) -> Result<Self, DescriptorError> {
+        let parsed_miniscript = match BdkMiniscript::from_str(&mini_script) {
+            Ok(miniscript) => miniscript,
+            Err(_) => {
+                return Err(DescriptorError::Miniscript {
+                    error_message: WITHHELD.to_string(),
+                });
+            }
+        };
+
+        let miniscript_descriptor =
+            match bdk_wallet::miniscript::Descriptor::new_sh_wsh(parsed_miniscript) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    return Err(DescriptorError::Miniscript {
+                        error_message: WITHHELD.to_string(),
+                    })
+                }
+            };
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new sh for a given redeem script Errors when miniscript exceeds resource limits under p2sh context or does not type check at the top level
+    #[uniffi::constructor]
+    pub fn new_sh(mini_script: String) -> Result<Self, DescriptorError> {
+        let parsed_miniscript = match BdkMiniscript::from_str(&mini_script) {
+            Ok(miniscript) => miniscript,
+            Err(_) => {
+                return Err(DescriptorError::Miniscript {
+                    error_message: WITHHELD.to_string(),
+                });
+            }
+        };
+
+        let miniscript_descriptor =
+            match bdk_wallet::miniscript::Descriptor::new_sh(parsed_miniscript) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    return Err(DescriptorError::Miniscript {
+                        error_message: WITHHELD.to_string(),
+                    })
+                }
+            };
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new bare descriptor from witness script Errors when miniscript exceeds resource limits
+    /// under bare context or does not type check at the top level
+    #[uniffi::constructor]
+    pub fn new_bare(mini_script: String) -> Result<Self, DescriptorError> {
+        let parsed_miniscript = match BdkMiniscript::from_str(&mini_script) {
+            Ok(miniscript) => miniscript,
+            Err(_) => {
+                return Err(DescriptorError::Miniscript {
+                    error_message: WITHHELD.to_string(),
+                });
+            }
+        };
+
+        let miniscript_descriptor =
+            match bdk_wallet::miniscript::Descriptor::new_bare(parsed_miniscript) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    return Err(DescriptorError::Miniscript {
+                        error_message: WITHHELD.to_string(),
+                    })
+                }
+            };
+        let extended_descriptor = ExtendedDescriptor::from(miniscript_descriptor);
+
+        Ok(Self {
+            extended_descriptor,
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Create a new sh wrapper for the given wpkh descriptor
+    #[uniffi::constructor]
+    pub fn new_sh_with_wpkh(wpkh: String) -> Result<Self, DescriptorError> {
+        let descriptor =
+            BdkDescriptor::<BdkDescriptorPublicKey>::from_str(&wpkh).map_err(|_| {
+                DescriptorError::Miniscript {
+                    error_message: WITHHELD.to_string(),
+                }
+            })?;
+
+        if let BdkDescriptor::Wpkh(wpkh_inner) = descriptor {
+            let sh_with_wpkh = bdk_wallet::miniscript::Descriptor::new_sh_with_wpkh(wpkh_inner);
+            Ok(Self {
+                extended_descriptor: ExtendedDescriptor::from(sh_with_wpkh),
+                key_map: KeyMap::new(),
+            })
+        } else {
+            Err(DescriptorError::Miniscript {
+                error_message: "Provided descriptor is not a valid wpkh descriptor".to_string(),
+            })
+        }
+    }
+
+    /// Create a new sh wrapper for the given wsh descriptor
+    #[uniffi::constructor]
+    pub fn new_sh_with_wsh(wsh: String) -> Result<Self, DescriptorError> {
+        let descriptor = BdkDescriptor::<BdkDescriptorPublicKey>::from_str(&wsh).map_err(|_| {
+            DescriptorError::Miniscript {
+                error_message: WITHHELD.to_string(),
+            }
+        })?;
+
+        if let BdkDescriptor::Wsh(wsh_inner) = descriptor {
+            let sh_with_wsh = bdk_wallet::miniscript::Descriptor::new_sh_with_wsh(wsh_inner);
+            Ok(Self {
+                extended_descriptor: ExtendedDescriptor::from(sh_with_wsh),
+                key_map: KeyMap::new(),
+            })
+        } else {
+            Err(DescriptorError::Miniscript {
+                error_message: "Provided descriptor is not a valid wsh descriptor".to_string(),
+            })
+        }
+    }
+
+    /// Create new tr descriptor
+    /// Errors when miniscript exceeds resource limits under Tap context
+    #[uniffi::constructor]
+    pub fn new_tr(key: String, script: Option<String>) -> Result<Self, DescriptorError> {
+        let key = BdkDescriptorPublicKey::from_str(&key).map_err(|_| DescriptorError::Key {
+            error_message: WITHHELD.to_string(),
+        })?;
+        let tap_tree = match script {
+            Some(s) => {
+                let ms_tap =
+                    BdkMiniscript::from_str(&s).map_err(|_| DescriptorError::Miniscript {
+                        error_message: WITHHELD.to_string(),
+                    })?;
+
+                Some(TapTree::Leaf(Arc::new(ms_tap)))
+            }
+            None => None,
+        };
+
+        let descriptor =
+            bdk_wallet::miniscript::Descriptor::new_tr(key, tap_tree).map_err(|_| {
+                DescriptorError::Miniscript {
+                    error_message: WITHHELD.to_string(),
+                }
+            })?;
+        Ok(Self {
+            extended_descriptor: ExtendedDescriptor::from(descriptor),
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Return a public version of this descriptor without secret key material.
+    pub fn as_public(&self) -> Arc<Self> {
+        Arc::new(Self {
+            extended_descriptor: self.extended_descriptor.clone(),
+            key_map: KeyMap::new(),
+        })
+    }
+
+    /// Dangerously convert the descriptor to a string.
+    pub fn to_string_with_secret(&self) -> String {
+        let descriptor = &self.extended_descriptor;
+        let key_map = &self.key_map;
+        descriptor.to_string_with_secret(key_map)
+    }
+
+    /// Does this descriptor contain paths: https://github.com/bitcoin/bips/blob/master/bip-0389.mediawiki
+    pub fn is_multipath(&self) -> bool {
+        self.extended_descriptor.is_multipath()
+    }
+
+    /// A unique identifier for the descriptor.
+    pub fn descriptor_id(&self) -> Arc<DescriptorId> {
+        let d_id = self.extended_descriptor.descriptor_id();
+        Arc::new(DescriptorId(d_id.0))
+    }
+
+    /// Return descriptors for all valid paths.
+    pub fn to_single_descriptors(&self) -> Result<Vec<Arc<Descriptor>>, MiniscriptError> {
+        self.extended_descriptor
+            .clone()
+            .into_single_descriptors()
+            .map_err(MiniscriptError::from)
+            .map(|descriptors| {
+                descriptors
+                    .into_iter()
+                    .map(|desc| {
+                        Arc::new(Descriptor {
+                            extended_descriptor: desc,
+                            key_map: self.key_map.clone(),
+                        })
+                    })
+                    .collect()
+            })
+    }
+
+    /// Computes an upper bound on the difference between a non-satisfied `TxIn`'s
+    /// `segwit_weight` and a satisfied `TxIn`'s `segwit_weight`.
+    pub fn max_weight_to_satisfy(&self) -> Result<u64, DescriptorError> {
+        let weight = self
+            .extended_descriptor
+            .max_weight_to_satisfy()
+            .map_err(|_| DescriptorError::Miniscript {
+                error_message: WITHHELD.to_string(),
+            })?;
+        Ok(weight.to_wu())
+    }
+
+    pub fn desc_type(&self) -> DescriptorType {
+        self.extended_descriptor.desc_type()
+    }
+
+    pub fn derive_address(
+        &self,
+        index: u32,
+        network: Network,
+    ) -> Result<Arc<Address>, DescriptorError> {
+        if self.extended_descriptor.is_multipath() {
+            return Err(DescriptorError::MultiPath);
+        }
+
+        let derived_descriptor = self
+            .extended_descriptor
+            .at_derivation_index(index)
+            .map_err(|error| match error {
+                ConversionError::HardenedChild => DescriptorError::HardenedDerivationXpub,
+                ConversionError::MultiKey => DescriptorError::MultiPath,
+            })?;
+
+        let address = derived_descriptor
+            .address(network)
+            .map_err(|_| DescriptorError::Miniscript {
+                error_message: WITHHELD.to_string(),
+            })?
+            .into();
+
+        Ok(Arc::new(address))
+    }
+
+    /// Whether or not the descriptor has any wildcards.
+    pub fn has_wildcard(&self) -> bool {
+        self.extended_descriptor.has_wildcard()
+    }
+
+    /// Checks whether the descriptor is safe.
+    ///
+    /// Checks whether all the spend paths in the descriptor are possible on the
+    /// bitcoin network under the current standardness and consensus rules. Also
+    /// checks whether the descriptor requires signatures on all spend paths and
+    /// whether the script is malleable.
+    ///
+    /// In general, all the guarantees of miniscript hold only for safe scripts.
+    /// The signer may not be able to find satisfactions even if one exists.
+    pub fn sanity_check(&self) -> Result<(), DescriptorError> {
+        self.extended_descriptor
+            .sanity_check()
+            .map_err(|_| DescriptorError::Miniscript {
+                error_message: WITHHELD.to_string(),
+            })
+    }
+}
+
+impl Display for Descriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.extended_descriptor)
+    }
+}

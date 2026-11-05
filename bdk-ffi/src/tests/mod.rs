@@ -1,0 +1,15 @@
+mod bitcoin;
+mod build_config;
+mod check_older;
+mod d10_leaf;
+mod descriptor;
+mod electrum_batch;
+mod electrum_script;
+mod electrum_tls;
+mod error;
+mod finalize;
+mod keys;
+mod replacement;
+mod support;
+mod tx_builder;
+mod wallet;

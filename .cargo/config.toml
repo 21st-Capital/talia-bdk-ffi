@@ -1,0 +1,29 @@
+[target.'cfg(target_os = "android")']
+rustflags = [
+    "-C", "link-arg=-z",
+    "-C", "link-arg=max-page-size=16384",
+    "-C", "link-arg=-z",
+    "-C", "link-arg=common-page-size=16384",
+]
+
+# TALIA FORK: the iOS version every native object in the library is built
+# for (decided 2026-10-07), the same value and form as 21st Capital's
+# bitbox-ffi and Talia's earlier bdk-ffi 0.30 library. Without it, cc stamps
+# the C code (ring, secp256k1) with the installed Xcode SDK's version as its
+# minimum iOS, so the objects claim a newer iOS than the app supports and
+# their bytes move with every Xcode update. 15.0 is the floor BitBoxFFI.podspec
+# uses; Talia targets 15.1. `force` so a shell variable cannot change it. Cargo
+# passes the value to rustc and to the C builds alike.
+#
+# At the repository root, not in bdk-ffi/: cargo reads .cargo/config.toml from
+# the directory it is started in and every parent, not from the manifest's
+# folder, so here it applies both inside bdk-ffi/ and from the root with
+# `--manifest-path bdk-ffi/Cargo.toml`. Under bdk-ffi/ it was silently skipped
+# from the root, and the C objects claimed the SDK's iOS (27.1) instead.
+#
+# This does NOT make the build independent of Xcode: the C code is still
+# compiled by the installed Xcode's own clang and every C object records that
+# SDK's version, so the Xcode version stays part of what the library's bytes
+# depend on (the build script prints it).
+[env]
+IPHONEOS_DEPLOYMENT_TARGET = { value = "15.0", force = true }

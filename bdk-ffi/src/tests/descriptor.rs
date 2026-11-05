@@ -1,0 +1,248 @@
+use crate::bitcoin::{Network, NetworkKind};
+use crate::descriptor::Descriptor;
+use crate::error::DescriptorError;
+use crate::error::WITHHELD;
+use crate::keys::{DerivationPath, DescriptorSecretKey, Mnemonic};
+use crate::types::KeychainKind;
+
+use assert_matches::assert_matches;
+
+fn get_descriptor_secret_key() -> DescriptorSecretKey {
+    let mnemonic = Mnemonic::from_string("chaos fabric time speed sponsor all flat solution wisdom trophy crack object robot pave observe combine where aware bench orient secret primary cable detect".to_string()).unwrap();
+    DescriptorSecretKey::new(NetworkKind::Test, &mnemonic, None)
+}
+
+#[test]
+fn test_descriptor_templates() {
+    let master: DescriptorSecretKey = get_descriptor_secret_key();
+    // tprv8ZgxMBicQKsPdWuqM1t1CDRvQtQuBPyfL6GbhQwtxDKgUAVPbxmj71pRA8raTqLrec5LyTs5TqCxdABcZr77bt2KyWA5bizJHnC4g4ysm4h
+    let handmade_public_44 = master
+        .derive(&DerivationPath::new("m/44h/1h/0h".to_string()).unwrap())
+        .unwrap()
+        .as_public();
+    // Public 44: [d1d04177/44'/1'/0']tpubDCoPjomfTqh1e7o1WgGpQtARWtkueXQAepTeNpWiitS3Sdv8RKJ1yvTrGHcwjDXp2SKyMrTEca4LoN7gEUiGCWboyWe2rz99Kf4jK4m2Zmx/*
+    let handmade_public_49 = master
+        .derive(&DerivationPath::new("m/49h/1h/0h".to_string()).unwrap())
+        .unwrap()
+        .as_public();
+    // Public 49: [d1d04177/49'/1'/0']tpubDC65ZRvk1NDddHrVAUAZrUPJ772QXzooNYmPywYF9tMyNLYKf5wpKE7ZJvK9kvfG3FV7rCsHBNXy1LVKW95jrmC7c7z4hq7a27aD2sRrAhR/*
+    let handmade_public_84 = master
+        .derive(&DerivationPath::new("m/84h/1h/0h".to_string()).unwrap())
+        .unwrap()
+        .as_public();
+    // Public 84: [d1d04177/84'/1'/0']tpubDDNxbq17egjFk2edjv8oLnzxk52zny9aAYNv9CMqTzA4mQDiQq818sEkNe9Gzmd4QU8558zftqbfoVBDQorG3E4Wq26tB2JeE4KUoahLkx6/*
+    let handmade_public_86 = master
+        .derive(&DerivationPath::new("m/86h/1h/0h".to_string()).unwrap())
+        .unwrap()
+        .as_public();
+    // Public 86: [d1d04177/86'/1'/0']tpubDCJzjbcGbdEfXMWaL6QmgVmuSfXkrue7m2YNoacWwyc7a2XjXaKojRqNEbo41CFL3PyYmKdhwg2fkGpLX4SQCbQjCGxAkWHJTw9WEeenrJb/*
+    let template_private_44 =
+        Descriptor::new_bip44(&master, KeychainKind::External, NetworkKind::Test);
+    let template_private_49 =
+        Descriptor::new_bip49(&master, KeychainKind::External, NetworkKind::Test);
+    let template_private_84 =
+        Descriptor::new_bip84(&master, KeychainKind::External, NetworkKind::Test);
+    let template_private_86 =
+        Descriptor::new_bip86(&master, KeychainKind::External, NetworkKind::Test);
+    // the extended public keys are the same when creating them manually as they are with the templates
+    let template_public_44 = Descriptor::new_bip44_public(
+        &handmade_public_44,
+        "d1d04177".to_string(),
+        KeychainKind::External,
+        NetworkKind::Test,
+    )
+    .unwrap();
+    let template_public_49 = Descriptor::new_bip49_public(
+        &handmade_public_49,
+        "d1d04177".to_string(),
+        KeychainKind::External,
+        NetworkKind::Test,
+    )
+    .unwrap();
+    let template_public_84 = Descriptor::new_bip84_public(
+        &handmade_public_84,
+        "d1d04177".to_string(),
+        KeychainKind::External,
+        NetworkKind::Test,
+    )
+    .unwrap();
+    let template_public_86 = Descriptor::new_bip86_public(
+        &handmade_public_86,
+        "d1d04177".to_string(),
+        KeychainKind::External,
+        NetworkKind::Test,
+    )
+    .unwrap();
+    // when using a public key, both to_string and to_string_private return the same string
+    assert_eq!(
+        template_public_44.to_string_with_secret(),
+        template_public_44.to_string()
+    );
+    assert_eq!(
+        template_public_49.to_string_with_secret(),
+        template_public_49.to_string()
+    );
+    assert_eq!(
+        template_public_84.to_string_with_secret(),
+        template_public_84.to_string()
+    );
+    assert_eq!(
+        template_public_86.to_string_with_secret(),
+        template_public_86.to_string()
+    );
+    // when using to_string on a private key, we get the same result as when using it on a public key
+    assert_eq!(
+        template_private_44.to_string(),
+        template_public_44.to_string()
+    );
+    assert_eq!(
+        template_private_49.to_string(),
+        template_public_49.to_string()
+    );
+    assert_eq!(
+        template_private_84.to_string(),
+        template_public_84.to_string()
+    );
+    assert_eq!(
+        template_private_86.to_string(),
+        template_public_86.to_string()
+    );
+}
+#[test]
+fn test_descriptor_from_string() {
+    let descriptor1 = Descriptor::new("wpkh(tprv8hwWMmPE4BVNxGdVt3HhEERZhondQvodUY7Ajyseyhudr4WabJqWKWLr4Wi2r26CDaNCQhhxEftEaNzz7dPGhWuKFU4VULesmhEfZYyBXdE/0/*)".to_string(), NetworkKind::Test);
+    let descriptor2 = Descriptor::new("wpkh(tprv8hwWMmPE4BVNxGdVt3HhEERZhondQvodUY7Ajyseyhudr4WabJqWKWLr4Wi2r26CDaNCQhhxEftEaNzz7dPGhWuKFU4VULesmhEfZYyBXdE/0/*)".to_string(), NetworkKind::Main);
+    // Creating a Descriptor using an extended key that doesn't match the network provided will throw a DescriptorError::Key with inner InvalidNetwork error
+    assert!(descriptor1.is_ok());
+    assert_matches!(descriptor2.unwrap_err(), DescriptorError::Key { .. });
+}
+
+#[test]
+fn test_new_bip84_public_invalid_fingerprint() {
+    let master: DescriptorSecretKey = get_descriptor_secret_key();
+    let public_84 = master
+        .derive(&DerivationPath::new("m/84h/1h/0h".to_string()).unwrap())
+        .unwrap()
+        .as_public();
+
+    let error = Descriptor::new_bip84_public(
+        &public_84,
+        "not-a-fingerprint".to_string(),
+        KeychainKind::External,
+        NetworkKind::Test,
+    )
+    .unwrap_err();
+
+    assert_matches!(error, DescriptorError::Bip32 { .. });
+}
+
+#[test]
+fn test_max_weight_to_satisfy() {
+    // Test P2WPKH descriptor using standard test descriptor
+    let descriptor = Descriptor::new(
+        "wpkh(tprv8ZgxMBicQKsPf2qfrEygW6fdYseJDDrVnDv26PH5BHdvSuG6ecCbHqLVof9yZcMoM31z9ur3tTYbSnr1WBqbGX97CbXcmp5H6qeMpyvx35B/84h/1h/1h/0/*)".to_string(),
+        NetworkKind::Test
+    ).unwrap();
+
+    let weight = descriptor.max_weight_to_satisfy().unwrap();
+
+    // Verify the method works and returns a positive weight
+    assert!(weight > 0, "Weight must be positive");
+}
+
+#[test]
+fn test_descriptor_derive_address() {
+    let descriptor = Descriptor::new_bip84(
+        &get_descriptor_secret_key(),
+        KeychainKind::External,
+        NetworkKind::Test,
+    );
+
+    let derived = descriptor
+        .derive_address(0, Network::Testnet)
+        .expect("derive address");
+
+    let expected_descriptor = descriptor
+        .extended_descriptor
+        .at_derivation_index(0)
+        .expect("derive descriptor");
+    let expected_address = expected_descriptor
+        .address(Network::Testnet)
+        .expect("address from descriptor");
+
+    assert_eq!(derived.to_string(), expected_address.to_string());
+}
+
+#[test]
+fn test_descriptor_derive_address_multipath_error() {
+    let descriptor = Descriptor::new(
+        "wpkh([9a6a2580/84'/1'/0']tpubDDnGNapGEY6AZAdQbfRJgMg9fvz8pUBrLwvyvUqEgcUfgzM6zc2eVK4vY9x9L5FJWdX8WumXuLEDV5zDZnTfbn87vLe9XceCFwTu9so9Kks/<0;1>/*)".to_string(),
+        NetworkKind::Test,
+    )
+    .expect("multipath descriptor parses");
+
+    let error = descriptor.derive_address(0, Network::Testnet).unwrap_err();
+
+    assert_matches!(error, DescriptorError::MultiPath);
+}
+
+/// The extended private key matching `get_descriptor_secret_key`'s mnemonic.
+const TPRV: &str = "tprv8ZgxMBicQKsPdWuqM1t1CDRvQtQuBPyfL6GbhQwtxDKgUAVPbxmj71pRA8raTqLrec5LyTs5TqCxdABcZr77bt2KyWA5bizJHnC4g4ysm4h";
+
+#[test]
+fn test_descriptor_parse_error_does_not_leak_secret_key() {
+    // A key pasted without its script function never reaches the key parser:
+    // miniscript's expression parser quotes the unrecognized node back
+    // verbatim.
+    let malformed = format!("{TPRV}/84h/1h/0h/0/*");
+
+    let error = Descriptor::new(malformed, NetworkKind::Test).unwrap_err();
+
+    assert!(
+        !error.to_string().contains(TPRV),
+        "descriptor parse error leaked the private key: {}",
+        error
+    );
+    assert_matches!(error, DescriptorError::Miniscript { error_message } if error_message == WITHHELD);
+}
+
+#[test]
+fn test_descriptor_parse_error_does_not_leak_mnemonic() {
+    let mnemonic = "chaos fabric time speed sponsor all flat solution wisdom trophy crack object robot pave observe combine where aware bench orient secret primary cable detect";
+
+    let error = Descriptor::new(mnemonic.to_string(), NetworkKind::Test).unwrap_err();
+
+    assert!(
+        !error.to_string().contains("chaos fabric time"),
+        "descriptor parse error leaked the seed phrase: {}",
+        error
+    );
+}
+
+#[test]
+fn test_secret_key_parse_error_does_not_leak_secret_key() {
+    let error = DescriptorSecretKey::from_string(format!("{TPRV}/0/*/0")).unwrap_err();
+
+    assert!(
+        !error.to_string().contains(TPRV),
+        "key parse error leaked the private key: {}",
+        error
+    );
+}
+
+#[test]
+fn test_descriptor_error_still_identifies_the_failure() {
+    // Withholding the parser text costs us the detail, but the variant still
+    // says what kind of failure it was.
+    let unparsable = format!("wpkh({TPRV}/84h/1h/0h/0/*");
+    assert_matches!(
+        Descriptor::new(unparsable, NetworkKind::Test).unwrap_err(),
+        DescriptorError::Miniscript { .. }
+    );
+
+    let bad_checksum = format!("wpkh({TPRV}/84h/1h/0h/0/*)#aaaaaaaa");
+    assert_matches!(
+        Descriptor::new(bad_checksum, NetworkKind::Test).unwrap_err(),
+        DescriptorError::InvalidDescriptorChecksum
+    );
+}

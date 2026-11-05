@@ -1,0 +1,93 @@
+on: [push, pull_request]
+
+name: CI
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    env:
+      TEST_ELECTRUM_SERVER: fortress.qtornado.com:443
+    strategy:
+      matrix:
+        rust:
+          - stable # STABLE
+          - 1.75.0 # MSRV
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.toml','**/Cargo.lock') }}
+      - name: Install rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+      - name: Test
+        run: cargo test --verbose --all-features
+
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust:
+          - stable # STABLE
+          - 1.75.0 # MSRV
+        features:
+          - --features default
+          - --no-default-features
+          - --no-default-features --features proxy
+          - --no-default-features --features openssl
+          - --no-default-features --features rustls
+          - --no-default-features --features rustls-ring
+          - --no-default-features --features proxy,openssl,rustls,rustls-ring
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('**/Cargo.toml','**/Cargo.lock') }}
+      - name: Install rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+      - name: Check features
+        run: cargo check --verbose ${{ matrix.features }}
+
+  fmt:
+    name: Rust fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Check fmt
+        run: cargo fmt --all -- --config format_code_in_doc_comments=true --check
+
+  clippy_check:
+    name: Rust clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.90.0
+          components: clippy
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.2.1
+      - run: cargo clippy --all-features --all-targets -- -D warnings

@@ -1,0 +1,85 @@
+name: Rust tests
+
+# Talia (21st Capital): the only test job this fork runs. `cargo test` of the
+# bdk-ffi crate on ubuntu-24.04, with the compiler the root rust-toolchain.toml
+# names. No macOS jobs and no Swift, Kotlin or Python binding tests: Talia
+# builds its own iOS library and Swift bindings outside CI. Actions are pinned
+# by commit.
+
+on:
+  push:
+    paths:
+      - 'bdk-ffi/**'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - '.github/workflows/test.yaml'
+  pull_request:
+    paths:
+      - 'bdk-ffi/**'
+      - 'rust-toolchain.toml'
+      - '.cargo/**'
+      - '.github/workflows/test.yaml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: "cargo test"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: bdk-ffi
+    steps:
+      - name: "Check out"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Install the toolchain rust-toolchain.toml names"
+        run: |
+          rustup --version
+          rustup toolchain install
+          rustc --version --verbose
+          cargo --version
+          # The root rust-toolchain.toml must be the one in force inside bdk-ffi/.
+          rustc -vV | grep -qx 'release: 1.97.1'
+
+      - name: "Check that Cargo.lock is current"
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: "Test"
+        run: cargo test --locked
+
+      # The dependency rules for the three iOS targets: no minreq, rustls 0.21, tokio,
+      # bip324, libsqlite3-sys or aws-lc-rs, and bdk_wallet and electrum-client are exactly the
+      # vendored copies (no "patch was not used"). cargo tree needs no iOS toolchain.
+      - name: "Dependency rules"
+        run: scripts/check-dependencies.sh
+
+      # Every vendored file is the crates.io release's, except the files listed in
+      # vendor/<name>.patched (downloads the .crate and checks its SHA-256 first).
+      - name: "Vendored crates are crates.io plus the listed patches"
+        run: |
+          vendor/check-vendored.sh bdk_wallet 3.1.0 1284fb23acc3e3022673712b55f4d5ce7e38aadc2c49bbef830dc3935f0a3289
+          vendor/check-vendored.sh electrum-client 0.25.0 1970c5d7bd9de6d4041cbfc3e46faa3e85fe7efcea2b0eb06750d3ae1ef577b7
+          vendor/check-vendored.sh bdk_electrum 0.24.1 97455296f4f798250eaa5f7aa51fc34298a72fb661784b4c52c190d730ad04f7
+
+      # vendor/<name>.diff applied to the crates.io release gives vendor/<name>/ byte for byte.
+      - name: "Vendored diffs are current"
+        run: |
+          vendor/vendored-diff.sh --check bdk_wallet 3.1.0 1284fb23acc3e3022673712b55f4d5ce7e38aadc2c49bbef830dc3935f0a3289
+          vendor/vendored-diff.sh --check electrum-client 0.25.0 1970c5d7bd9de6d4041cbfc3e46faa3e85fe7efcea2b0eb06750d3ae1ef577b7
+          vendor/vendored-diff.sh --check bdk_electrum 0.24.1 97455296f4f798250eaa5f7aa51fc34298a72fb661784b4c52c190d730ad04f7
+
+      # The patched bdk_wallet against upstream's own integration tests, with the crate's own
+      # Cargo.lock. Started from bdk-ffi/ so the root rust-toolchain.toml (not the crate's 1.95.0)
+      # applies. Its dev-dependencies never reach the shipped library. The crate's lib unit tests
+      # are left out: the published crate drops the path self-dependency they need.
+      - name: "Vendored bdk_wallet's own test suites"
+        run: >-
+          cargo test --manifest-path vendor/bdk_wallet/Cargo.toml --locked
+          --target-dir target/vendor-bdk_wallet
+          --features test-utils,all-keys,rusqlite,file_store --test '*'

@@ -1,0 +1,15 @@
+default:
+  just --list
+
+build:
+  cargo build --locked --profile release-smaller
+
+build-dev:
+  cargo build --locked
+
+check:
+   cargo fmt
+   cargo clippy --locked
+
+test:
+  cargo test --locked

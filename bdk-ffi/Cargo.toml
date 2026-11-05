@@ -1,0 +1,134 @@
+[package]
+name = "bdk-ffi"
+version = "3.1.1"
+homepage = "https://bitcoindevkit.org"
+repository = "https://github.com/bitcoindevkit/bdk"
+edition = "2018"
+# TALIA FORK: feature resolver 2 (edition 2018 defaults to 1). Under resolver 1 the features
+# the dev-dependency (uniffi "bindgen-tests") and the build-dependency (uniffi "build") ask for
+# were merged into the normal build, so uniffi_testing and uniffi_build were compiled into the
+# shipped static library for iOS and some of their code reached the app binary. With 2, each
+# keeps its own features. uniffi's "cli" feature belongs to the uniffi-bindgen binary alone (its
+# required-features below): as a normal dependency feature it brought uniffi_bindgen, clap,
+# goblin, askama, cargo_metadata and others into the shipped static library, and a few of their
+# shared functions into the app binary (decided 2026-10-17).
+resolver = "2"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+name = "bdkffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+# TALIA FORK: built only when asked for by name with its features, as Talia's build script does
+# (cargo run --features uniffi/cli,uniffi/cargo-metadata --bin uniffi-bindgen); `cargo build
+# --lib` never sees it. cargo-metadata is what makes the tool read uniffi.toml (the Swift module
+# names) in library mode.
+required-features = ["uniffi/cli", "uniffi/cargo-metadata"]
+
+[dependencies]
+# TALIA FORK: no "rusqlite" feature, no bdk_esplora, no bdk_kyoto. Talia syncs over Electrum
+# only and keeps no wallet database on the phone, so the SQLite persister, the Esplora client
+# (minreq, rustls 0.21) and the compact-filter node (tokio, bip324) are not built at all.
+bdk_wallet = { version = "=3.1.0", features = ["all-keys", "keys-bip39"] }
+# TALIA FORK: at least 0.24.1 (with bdk_core 0.6.4): full_scan scans the whole revealed range
+# before the stop gap applies (bdk #2222), which the app bridge's address discovery relies on;
+# it also checks each fetched transaction's txid (#2228) and drops stale anchors after a reorg
+# (#2319). bdk_chain at least 0.23.4: canonicalization and merge_chains fixes (#2170, #2174,
+# #2229, #2324). No features of its own: bdk_wallet enables what it needs.
+bdk_electrum = { version = "0.24.1", default-features = false, features = ["use-rustls-ring"] }
+bdk_chain = { version = "0.23.4", default-features = false }
+# TALIA FORK: a direct, exact requirement on the electrum-client that bdk_electrum uses, so the
+# vendored, TLS-patched copy in [patch.crates-io] always applies: a bdk_electrum that wanted
+# another electrum-client could not resolve, rather than quietly bringing in an unpatched one.
+# src/electrum.rs also checks at compile time that bdk_electrum's client is this crate's. The
+# same features bdk_electrum asks for (rustls with ring, SOCKS5 for Tor); no default features,
+# which would add aws-lc-rs.
+electrum-client = { version = "=0.25.0", default-features = false, features = ["proxy", "rustls-ring"] }
+# TALIA FORK: C code the app links twice. This library ships next to libbitboxffi (21st Capital's
+# bitbox-ffi), and both carry secp256k1's C library under the same symbol names
+# (rustsecp256k1_v0_10_0_*), so both must build the very same code: secp256k1-sys 0.10.1 with
+# the features "alloc", "recovery" and "std" and no others (`cargo tree -e features -i
+# secp256k1-sys --target aarch64-apple-ios` gives exactly these in both), compiled by cc 1.4.4
+# as in bitbox-ffi's Cargo.lock. Before this line the set only came about through other crates'
+# defaults; now it is stated, and "=" keeps a 0.10.x with other C code (same symbol prefix) out.
+# The symbol-overlap gate (scripts/symbol-overlap-gate.py) checks the built objects.
+# ring stays at 0.17.14 (not a direct dependency): crates.io has no later 0.17 release (index
+# checked 2026-10-16), so its symbols keep the old library's prefix ring_core_0_17_14_ and the
+# symbol-overlap gate has to show them identical to the old library's. A later 0.17 release
+# would bring its own prefix and end the overlap.
+secp256k1-sys = { version = "=0.10.1", default-features = false, features = ["alloc", "recovery", "std"] }
+
+# TALIA FORK: no default features: uniffi's default "cargo-metadata" (cargo_metadata, camino) is
+# the bindgen tool's, like "cli" (see [[bin]] and [features]).
+uniffi = { version = "=0.31.2", default-features = false }
+thiserror = "2.0.17"
+
+[build-dependencies]
+uniffi = { version = "=0.31.2", features = ["build"] }
+
+[features]
+# TALIA FORK: for 21st Capital's equivalence test harness only, which is kept outside this
+# repository. It adds one `#[doc(hidden)]` module to the Rust API that re-exports what the harness
+# drives (the same exported functions the app's bridge calls) and nothing else: no code of the
+# library changes. Never enabled by a build Talia links (`cargo build --profile release-smaller`
+# builds no features), and nothing in this repository enables it.
+talia-golden = []
+# TALIA FORK: uniffi's "cli" and "cargo-metadata" features, for the uniffi-bindgen binary alone
+# (its required-features name the dependency features themselves). This crate feature is never
+# enabled by a build; it only keeps the tool's dependencies in Cargo.lock, which cargo resolves
+# with every feature of the package, so `cargo run --locked --features ...` works.
+bindgen-cli = ["uniffi/cli", "uniffi/cargo-metadata"]
+
+[dev-dependencies]
+uniffi = { version = "=0.31.2", features = ["bindgen-tests"] }
+assert_matches = "1.5.0"
+# TALIA FORK: a local TLS server for src/tests/electrum_tls.rs. The same rustls, with the same
+# features, as the vendored electrum-client already builds.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+# TALIA FORK: the consensus check of src/tests/d10_leaf.rs: libbitcoinconsensus of Bitcoin
+# Core 26.0, called with raw bytes so it needs nothing from the library under test. A
+# dev-dependency: never in the shipped graph.
+bitcoinconsensus = "=0.106.0"
+
+[profile.release-smaller]
+inherits = "release"
+opt-level = 'z'     # Optimize for size.
+# TALIA FORK: `lto = true` applies to the uniffi-bindgen binary only. bdkffi itself is built as
+# lib + cdylib + staticlib in one rustc call, and cargo passes no `-C lto` to it (see
+# `cargo build -v`), so the static library Talia ships is not LTO'd: it holds one member per
+# crate, std, core and compiler_builtins included, each with embedded bitcode (about 513 members,
+# 146 MB). That is why prebuilt toolchain members overlap with the other libraries the app links.
+# Building the staticlib alone (`cargo rustc --lib --crate-type staticlib`) would let rustc run
+# fat LTO, but changes the library's bytes: the symbol-overlap gate and the minos check would
+# have to run again.
+lto = true
+codegen-units = 1   # Reduce number of codegen units to increase optimizations.
+# TALIA FORK: unwind, never abort. uniffi catches an unwinding panic at the
+# FFI boundary and hands Swift an error it can catch (and, with every bridge
+# call fallible, a poisoned wallet lock becomes an error too). With "abort"
+# any Rust panic closes the app mid-signing, as the check_older panic did in
+# July 2026. Same setting as Talia's earlier bdk 0.28 library and bitbox-ffi.
+panic = "unwind"
+strip = "debuginfo" # Partially strip symbols from binary
+
+[patch.crates-io]
+# TALIA FORK: bdk_wallet 3.1.0 exactly as crates.io published it (the .crate's SHA-256 is
+# 1284fb23acc3e3022673712b55f4d5ce7e38aadc2c49bbef830dc3935f0a3289, the checksum Cargo.lock
+# pinned before the crate was vendored), plus only the Talia patches listed in
+# vendor/bdk_wallet.patched.
+# vendor/check-vendored.sh proves it file by file (see vendor/README.md). Drop each patch, and
+# this entry with the last one, once a crates.io release carries it.
+bdk_wallet = { path = "vendor/bdk_wallet" }
+# TALIA FORK: electrum-client 0.25.0 exactly as crates.io published it (SHA-256
+# 1970c5d7bd9de6d4041cbfc3e46faa3e85fe7efcea2b0eb06750d3ae1ef577b7, the checksum Cargo.lock
+# pinned before the crate was vendored), plus only the patches listed in
+# vendor/electrum-client.patched.
+electrum-client = { path = "vendor/electrum-client" }
+# TALIA FORK: bdk_electrum 0.24.1 exactly as crates.io published it (SHA-256
+# 97455296f4f798250eaa5f7aa51fc34298a72fb661784b4c52c190d730ad04f7, the checksum Cargo.lock
+# pinned before the crate was vendored), plus only the patches listed in
+# vendor/bdk_electrum.patched.
+bdk_electrum = { path = "vendor/bdk_electrum" }
