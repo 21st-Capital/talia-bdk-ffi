@@ -35,7 +35,7 @@ impl Persister {
     ///
     /// TALIA FORK: a plain in-memory changeset instead of an in-memory SQLite database. Nothing
     /// is written anywhere; the wallet is rebuilt from its descriptors and a fresh sync every
-    /// time (decision D5). Still returns `Result`, as upstream's did.
+    /// time (decided 2026-10-15). Still returns `Result`, as upstream's did.
     #[uniffi::constructor]
     pub fn new_in_memory() -> Result<Self, PersistenceError> {
         Ok(Self {
