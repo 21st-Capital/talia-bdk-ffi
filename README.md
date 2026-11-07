@@ -9,9 +9,9 @@ Kotlin and Swift packaging is not.
 ## This copy
 
 The repository is published as a fresh copy of a reviewed commit of 21st Capital's private
-repository: its files are exactly that commit's, without the version history. When Talia ships
-an App Store release, a script exports the reviewed commit, scans it and adds it here as one
-new commit.
+repository: its files are exactly that commit's, without the version history. Each change is
+reviewed there and copied here as one new commit before Talia builds the library from it, so
+the library the app links is always built from a commit of this repository's `main`.
 
 Issues are welcome. Pull requests from outside 21st Capital are not accepted for now: a change
 is made in the private repository and arrives here with the next copy.
@@ -77,7 +77,7 @@ The changed places in the code carry a `TALIA FORK` note saying what changed and
 ## What Talia builds
 
 Talia's build script builds the library from `bdk-ffi/`, under an environment cleared down to
-the basics, with
+the basics plus two variables of its own (below), with
 
 ```sh
 cargo build --locked --package bdk-ffi --lib --profile release-smaller --target aarch64-apple-ios
@@ -89,11 +89,19 @@ cargo build --locked --package bdk-ffi --lib --profile release-smaller --target 
 bindings with this crate's own `uniffi-bindgen` (`cargo run --locked --features
 uniffi/cli,uniffi/cargo-metadata --bin uniffi-bindgen -- generate <library> --language swift`).
 
-The library's bytes depend on the commit, the Rust compiler (1.97.1), the Xcode whose clang
-compiles the C code inside (ring, secp256k1) and the path of the Cargo registry, which crates.io
-dependencies' panic messages embed. The checkout path does not enter them. Two builds of the
-same commit match byte for byte only with the same rustc, the same Xcode and the same Cargo home
-folder.
+The two variables keep the build machine's folders out of the library (decided 2026-11-06).
+`CARGO_ENCODED_RUSTFLAGS` holds `--remap-path-prefix=<Cargo home>=/cargo` and
+`--remap-path-prefix=<checkout>=/talia-bdk-ffi` (the two separated by the byte 0x1f), for the
+paths rustc writes into panic messages. `CFLAGS` holds the same two as `-ffile-prefix-map`
+flags and a third, `-ffile-prefix-map=<Xcode folder>=/xcode`, for clang: ring builds its C and
+assembly with debug information on Apple targets, which records their source folders and the
+iOS SDK's and clang's include folders. The Cargo home is `$HOME/.cargo`, the checkout is the
+repository root (the folder holding `bdk-ffi/`) by its physical path (`pwd -P`), and the Xcode
+folder is the one `xcode-select -p` names; a folder reached through a link is mapped by its
+physical path as well, and the paths must hold no spaces and no `=`. So the library's bytes
+depend on the commit, the Rust compiler (1.97.1), the version of the Xcode whose clang compiles
+the C code inside (ring, secp256k1) and those two variables with exactly these names, and not
+on where the checkout, the home folder or Xcode sits.
 
 Run the tests with `cargo test --locked` inside `bdk-ffi/`.
 
